@@ -1,0 +1,21 @@
+# Raw and generated data must never enter git history (Delivery Guide §4.7).
+# The pipeline creates these directories at runtime from an empty folder.
+data/raw/
+data/curated/
+
+# Virtual environments
+.venv/
+venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor noise
+.DS_Store

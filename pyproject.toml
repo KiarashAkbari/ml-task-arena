@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-factory"
+version = "0.1.0"
+description = "Reproducible NYC 311 dataset factory (Term 3, Stage 1)"
+readme = "README.md"
+requires-python = ">=3.9"
+# Keep these exact pins in sync with requirements.txt.
+dependencies = [
+    "pandas==2.2.3",
+    "requests==2.32.3",
+]
+
+[project.scripts]
+data-factory = "data_factory.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

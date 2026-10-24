@@ -1,0 +1,50 @@
+{
+  "source": {
+    "url": "https://data.cityofnewyork.us/resource/erm2-nwe9.json",
+    "field_map": {
+      "unique_key": "unique_key",
+      "created_date": "created_date",
+      "closed_date": "closed_date",
+      "agency": "agency",
+      "complaint_type": "complaint_type",
+      "borough": "borough",
+      "zip_code": "incident_zip",
+      "status": "status",
+      "incident_address": "incident_address",
+      "descriptor": "descriptor"
+    }
+  },
+  "population": {
+    "path": "data/reference/zip_population.csv",
+    "source_url": "",
+    "fetched_date": ""
+  },
+  "scope": {
+    "agency": "NYPD",
+    "complaint_types": [
+      "Noise - Residential",
+      "Noise - Street/Sidewalk",
+      "Noise - Commercial",
+      "Noise - Vehicle",
+      "Noise - Park",
+      "Noise - House of Worship"
+    ]
+  },
+  "date_range": {
+    "start": "2023-01-01",
+    "end": "2024-06-30"
+  },
+  "fetch": {
+    "batch_size": 1000,
+    "max_retries": 5,
+    "retry_backoff_seconds": 1.0,
+    "timeout_seconds": 30.0
+  },
+  "paths": {
+    "raw_dir": "data/raw",
+    "curated_dir": "data/curated"
+  },
+  "quarantine": {
+    "max_ratio": 0.05
+  }
+}
