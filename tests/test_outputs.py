@@ -189,7 +189,20 @@ class ManifestTests(OutputsTestBase):
             manifest["population_source"]["path"],
             settings.population_path.as_posix(),
         )
-        self.assertIsNone(manifest["population_source"]["source_url"])  # until student fills
+        # The manifest mirrors whatever the config records: empty until the
+        # student picks a source, then the real URL and fetch date. Asserting a
+        # fixed value here would break the moment the committed config is
+        # filled in, which is the state the delivery ships in.
+        self.assertEqual(
+            manifest["population_source"]["source_url"],
+            settings.population_source_url or None,
+        )
+        self.assertEqual(
+            manifest["population_source"]["fetched_date"],
+            settings.population_fetched_date.isoformat()
+            if settings.population_fetched_date
+            else None,
+        )
 
         curated = Path(settings.curated_dir)
         self.assertEqual(
@@ -201,6 +214,19 @@ class ManifestTests(OutputsTestBase):
                 self.assertEqual(entry["sha256"], sha256_file(curated / name))
                 self.assertEqual(entry["bytes"], (curated / name).stat().st_size)
         self.assertEqual(sorted(result.output_hashes), sorted(manifest["outputs"]))
+
+    def test_manifest_records_an_unfilled_population_source_as_null(self) -> None:
+        """Before a source is chosen the manifest must say null, not invent one."""
+        settings = dataclasses.replace(
+            self.settings(), population_source_url="", population_fetched_date=None
+        )
+        self.pipeline([record(0)], settings)
+        run_outputs(settings, started_at="s", finished_at="f")
+        manifest = json.loads(
+            (Path(settings.curated_dir) / MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+        self.assertIsNone(manifest["population_source"]["source_url"])
+        self.assertIsNone(manifest["population_source"]["fetched_date"])
 
     def test_manifest_breaks_down_quarantine_reasons(self) -> None:
         settings = self.settings()
