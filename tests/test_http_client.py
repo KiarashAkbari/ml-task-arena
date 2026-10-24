@@ -83,6 +83,9 @@ class HttpClientTests(unittest.TestCase):
         payload = self.client.get("https://example.test/resource")
         self.assertEqual(payload, {"rows": []})
         self.assertEqual(self.session.request.call_count, 2)
+        # Every real HTTP attempt (including failed retries) is counted for
+        # the request-budget report (AGENTS.md section 4.8.3).
+        self.assertEqual(self.client.request_count, 2)
 
     def test_timeout_is_retried_then_fails_with_network_error(self) -> None:
         self.session.request.side_effect = requests.Timeout("too slow")

@@ -67,6 +67,9 @@ class HttpClient:
         self._policy = policy
         self._session = session if session is not None else requests.Session()
         self._sleep = sleep
+        # Total HTTP requests issued, including retries: the seed for the
+        # request-budget report of AGENTS.md section 4.8 (item 3).
+        self.request_count = 0
 
     def get(self, url: str, *, params: dict[str, Any] | None = None) -> Any:
         """Perform a GET request and return the parsed JSON body."""
@@ -90,6 +93,7 @@ class HttpClient:
             if attempt:
                 delay = self._policy.retry_backoff_seconds * BACKOFF_FACTOR ** (attempt - 1)
                 self._sleep(delay)
+            self.request_count += 1
             try:
                 response = self._session.request(
                     method,
