@@ -94,6 +94,23 @@ reference data, not raw 311 dumps), and record its URL + fetch date in
 `config/default.json` under `population.source_url` / `population.fetched_date`
 for the report and manifest.
 
+`scripts/build_population_reference.py` builds exactly that file from two
+sources independent of the 311 data — 2020 Census DHC population by ZCTA, and
+the NYC ZIP-plan rule for the district — then validates the result through the
+same loader `clean` uses:
+
+```bash
+python scripts/build_population_reference.py --write-config
+python scripts/build_population_reference.py --check      # re-validate anytime
+python scripts/build_population_reference.py --csv PATH   # offline/blocked network
+```
+
+The 110xx prefix is deliberately excluded (it mixes Queens border ZIPs with
+Nassau County), so a handful of cases keep a null population and show up in
+`clean`'s `zip unknown` count instead of quietly inflating a borough's
+denominator. `fetch` and `curate` do not need this file — only `clean` and
+`outputs` do.
+
 ## Source field map
 
 `source.field_map` in config binds canonical field names to the raw API field
