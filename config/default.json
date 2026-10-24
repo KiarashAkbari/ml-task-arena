@@ -1,4 +1,18 @@
 {
+  "source": {
+    "url": "https://data.cityofnewyork.us/resource/erm2-nwe9.json"
+  },
+  "scope": {
+    "agency": "NYPD",
+    "complaint_types": [
+      "Noise - Residential",
+      "Noise - Street/Sidewalk",
+      "Noise - Commercial",
+      "Noise - Vehicle",
+      "Noise - Park",
+      "Noise - House of Worship"
+    ]
+  },
   "date_range": {
     "start": "2023-01-01",
     "end": "2024-06-30"

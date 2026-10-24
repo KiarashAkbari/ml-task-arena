@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from data_factory.config import load_config
 from data_factory.errors import ValidationError
 from scripts import scope_counts
+
+URL = "https://data.cityofnewyork.us/resource/erm2-nwe9.json"
 
 
 class _FakeClient:
@@ -25,7 +26,9 @@ class FetchCountTests(unittest.TestCase):
         for key in ("count_1", "count"):
             with self.subTest(key=key):
                 client = _FakeClient([{key: "123456"}])
-                self.assertEqual(scope_counts.fetch_count(client, "agency='NYPD'"), 123456)
+                self.assertEqual(
+                    scope_counts.fetch_count(client, URL, "agency='NYPD'"), 123456
+                )
                 self.assertEqual(client.params["$select"], "count(1)")
                 self.assertIn("agency='NYPD'", client.params["$where"])
 
@@ -39,7 +42,7 @@ class FetchCountTests(unittest.TestCase):
         ]
         for payload in bad_payloads:
             with self.subTest(payload=payload), self.assertRaises(ValidationError):
-                scope_counts.fetch_count(_FakeClient(payload), "x=1")
+                scope_counts.fetch_count(_FakeClient(payload), URL, "x=1")
 
     def test_row_count_parses_grouped_rows_only(self) -> None:
         self.assertEqual(
@@ -53,26 +56,6 @@ class FetchCountTests(unittest.TestCase):
             )
         with self.assertRaises(ValidationError):
             scope_counts._row_count({"status": "Closed", "count_1": "?"}, "status")
-
-
-class ScopeClauseTests(unittest.TestCase):
-    def test_window_clause_uses_configured_dates_with_exclusive_end(self) -> None:
-        settings = load_config()
-        clause = scope_counts.window_where(settings)
-        self.assertIn(f">= '{settings.start_date.isoformat()}T00:00:00'", clause)
-        end_plus_one = settings.end_date.toordinal() + 1
-        from datetime import date
-
-        self.assertIn(f"< '{date.fromordinal(end_plus_one).isoformat()}T00:00:00'", clause)
-
-    def test_candidates_encode_both_agency_scopes(self) -> None:
-        settings = load_config()
-        pairs = dict(scope_counts.candidates(settings))
-        self.assertIn("agency='NYPD'", pairs["NYPD noise"])
-        self.assertIn("LIKE 'Noise%'", pairs["NYPD noise"])
-        self.assertIn("agency='DSNY'", pairs["DSNY"])
-        for clause in pairs.values():
-            self.assertIn(str(settings.start_date), clause)
 
 
 if __name__ == "__main__":

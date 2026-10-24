@@ -11,6 +11,8 @@ from data_factory.config import DEFAULT_CONFIG_PATH, load_config
 from data_factory.errors import ConfigError
 
 VALID_CONFIG = {
+    "source": {"url": "https://data.cityofnewyork.us/resource/erm2-nwe9.json"},
+    "scope": {"agency": "NYPD", "complaint_types": ["Noise - Residential"]},
     "date_range": {"start": "2023-01-01", "end": "2024-06-30"},
     "fetch": {
         "batch_size": 1000,
@@ -102,6 +104,42 @@ class LoadConfigTests(unittest.TestCase):
         config["qurantine"] = {"max_ratio": 0.05}  # deliberate typo
         with self.assertRaises(ConfigError):
             load_config(self._write(config))
+
+    def test_invalid_source_and_scope_rejected(self) -> None:
+        invalid = [
+            {"source": None},                                  # section missing
+            {"source": {"url": "example.com"}},                # no scheme
+            {"source": {"url": "ftp://example.test/x"}},       # wrong scheme
+            {"source": {"url": ""}},                           # empty
+            {"scope": None},                                   # section missing
+            {"scope": {"agency": "", "complaint_types": ["x"]}},  # empty agency
+            {"scope": {"agency": 42, "complaint_types": ["x"]}},  # wrong type
+            {"scope": {"agency": "NYPD", "complaint_types": []}},  # empty list
+            {"scope": {"agency": "NYPD", "complaint_types": [42]}},  # non-string
+            {"scope": {"agency": "NYPD", "complaint_types": ["x", "x"]}},  # duplicate
+            {"scope": {"agency": "NYPD", "complaint_types": ["ok", "  "]}},  # blank
+        ]
+        for change in invalid:
+            section, replacement = next(iter(change.items()))
+            config = json.loads(json.dumps(VALID_CONFIG))
+            if replacement is None:
+                del config[section]
+            else:
+                config[section] = replacement
+            with self.subTest(change=change), self.assertRaises(ConfigError):
+                load_config(self._write(config))
+
+    def test_scope_values_come_from_file(self) -> None:
+        config = json.loads(json.dumps(VALID_CONFIG))
+        config["scope"] = {
+            "agency": "DSNY",
+            "complaint_types": ["Dirty Condition", "Missed Collection"],
+        }
+        settings = load_config(self._write(config))
+        self.assertEqual(settings.scope_agency, "DSNY")
+        self.assertEqual(
+            settings.scope_complaint_types, ("Dirty Condition", "Missed Collection")
+        )
 
     def test_values_come_from_file_not_hardcoded(self) -> None:
         config = json.loads(json.dumps(VALID_CONFIG))

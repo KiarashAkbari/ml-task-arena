@@ -1,71 +1,53 @@
 #!/usr/bin/env python
-"""Measure scope-candidate evidence for AGENTS.md section 3.
+"""Measure evidence for the LOCKED fetch scope (AGENTS.md section 3).
 
 Run on a machine WITH internet access, from the repository root:
 
     python scripts/scope_counts.py [--config PATH]
 
-For each scope candidate — NYPD noise complaints and DSNY — over the date
-window from the project config, it reports:
+For the scope configured in the project config (agency + explicit complaint
+types + date window), it reports:
 
   * total record count vs the 300,000-record floor (section 3),
   * status breakdown (input for the missing-duration policy, section 4.4),
-  * the top complaint types (evidence for narrowing the scope),
+  * the complaint types present (scope-integrity check),
   * how many HTTP requests it took (seed for the request budget, 4.8.3).
 
-The printed numbers are the evidence the report must cite when justifying the
-scope criterion and the date window.
+The printed numbers are the evidence the report cites when justifying the
+scope criterion and the date window. Historically this script compared the
+two candidate scopes (NYPD noise vs DSNY); the candidate counts that decided
+the scope were measured on 2026-10-24 (859,910 vs 445,384).
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from datetime import timedelta
 from typing import Any
 
 from data_factory.config import DEFAULT_CONFIG_PATH, Settings, load_config
 from data_factory.errors import DataFactoryError, ValidationError
 from data_factory.http_client import HttpClient, RetryPolicy
+from data_factory.scope import build_where
 
-# Moves into project config when the fetch stage lands (step 4).
-SOURCE_URL = "https://data.cityofnewyork.us/resource/erm2-nwe9.json"
 MIN_RECORDS = 300_000  # floor from AGENTS.md section 3
 TOP_TYPES_LIMIT = 15
 
 
-def window_where(settings: Settings) -> str:
-    """Build the date-window clause; the configured end date is inclusive."""
-    end_exclusive = settings.end_date + timedelta(days=1)
-    return (
-        f"created_date >= '{settings.start_date.isoformat()}T00:00:00' "
-        f"AND created_date < '{end_exclusive.isoformat()}T00:00:00'"
-    )
-
-
-def candidates(settings: Settings) -> list[tuple[str, str]]:
-    """Scope candidates as (label, $where clause) pairs."""
-    window = window_where(settings)
-    return [
-        ("NYPD noise", f"agency='NYPD' AND complaint_type LIKE 'Noise%' AND {window}"),
-        ("DSNY", f"agency='DSNY' AND {window}"),
-    ]
-
-
-def _fetch(client: HttpClient, params: dict[str, Any]) -> list[dict[str, Any]]:
-    payload = client.get(SOURCE_URL, params=params)
+def _fetch(client: HttpClient, url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = client.get(url, params=params)
     if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
         raise ValidationError(f"unexpected response shape for {params}: {payload!r}")
     return payload
 
 
-def fetch_count(client: HttpClient, where: str) -> int:
+def fetch_count(client: HttpClient, url: str, where: str) -> int:
     """Return record count for a $where clause via a single count query.
 
     Socrata names the ``count(1)`` column variably (observed live: ``count_1``,
     also ``count``), so the single returned value is parsed positionally.
     """
-    rows = _fetch(client, {"$select": "count(1)", "$where": where})
+    rows = _fetch(client, url, {"$select": "count(1)", "$where": where})
     if len(rows) != 1:
         raise ValidationError(f"count query returned {len(rows)} row(s): {rows!r}")
     row = rows[0]
@@ -96,11 +78,12 @@ def _row_count(row: dict[str, Any], group_field: str) -> int:
 
 
 def fetch_group(
-    client: HttpClient, *, group_field: str, where: str
+    client: HttpClient, url: str, *, group_field: str, where: str
 ) -> list[dict[str, Any]]:
     """Return (value, count) rows for a field, most frequent first."""
     return _fetch(
         client,
+        url,
         {
             "$select": f"{group_field},count(1)",
             "$group": group_field,
@@ -113,7 +96,7 @@ def fetch_group(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scope_counts",
-        description="Measure scope-candidate counts against the 300k floor.",
+        description="Measure the locked scope's counts against the 300k floor.",
     )
     parser.add_argument(
         "--config",
@@ -124,27 +107,38 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        settings = load_config(args.config)
+        settings: Settings = load_config(args.config)
         client = HttpClient(RetryPolicy.from_settings(settings))
+        where = build_where(settings)
+        label = (
+            f"{settings.scope_agency} / {len(settings.scope_complaint_types)} "
+            "locked complaint types"
+        )
 
         print(f"window: {settings.start_date} .. {settings.end_date} (inclusive)")
         print(f"floor:  {MIN_RECORDS:,} records")
-        for label, where in candidates(settings):
-            total = fetch_count(client, where)
-            verdict = "PASS" if total >= MIN_RECORDS else "FAIL"
-            print(f"\n=== {label}: {total:,} records — {verdict} "
-                  f"(margin {total - MIN_RECORDS:+,})")
 
-            statuses = fetch_group(client, group_field="status", where=where)
-            for row in statuses:
-                count = _row_count(row, "status")
-                share = 100 * count / total if total else 0.0
-                print(f"  status {row['status']!r}: {count:,} ({share:.1f}%)")
+        total = fetch_count(client, settings.source_url, where)
+        verdict = "PASS" if total >= MIN_RECORDS else "FAIL"
+        print(f"\n=== {label}: {total:,} records — {verdict} "
+              f"(margin {total - MIN_RECORDS:+,})")
 
-            types = fetch_group(client, group_field="complaint_type", where=where)
-            print(f"  top complaint types (of {len(types)}):")
-            for row in types[:TOP_TYPES_LIMIT]:
-                print(f"  {_row_count(row, 'complaint_type'):>10,}  {row['complaint_type']}")
+        statuses = fetch_group(
+            client, settings.source_url, group_field="status", where=where
+        )
+        for row in statuses:
+            count = _row_count(row, "status")
+            share = 100 * count / total if total else 0.0
+            print(f"  status {row['status']!r}: {count:,} ({share:.1f}%)")
+
+        types = fetch_group(
+            client, settings.source_url, group_field="complaint_type", where=where
+        )
+        print(f"  complaint types present (of {len(settings.scope_complaint_types)} locked):")
+        for row in types[:TOP_TYPES_LIMIT]:
+            print(f"  {_row_count(row, 'complaint_type'):>10,}  {row['complaint_type']}")
+        if len(types) > TOP_TYPES_LIMIT:
+            print(f"  ... and {len(types) - TOP_TYPES_LIMIT} more")
 
         print(f"\nHTTP requests made: {client.request_count}")
         return 0

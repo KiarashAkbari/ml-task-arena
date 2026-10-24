@@ -17,9 +17,10 @@ data-factory --show-config    # resolve and print the active configuration
 
 ## Configuration
 
-All tunables live outside the code in `config/default.json` (date range, batch size,
-paths, retry cap, backoff/timeout, quarantine threshold). Point to another file with
-`--config PATH`. Unknown keys are rejected so typos fail fast.
+All tunables live outside the code in `config/default.json` (source URL, locked
+scope — agency + explicit complaint types —, date range, batch size,
+paths, retry cap, backoff/timeout, quarantine threshold). Point to another file
+with `--config PATH`. Unknown keys are rejected so typos fail fast.
 
 ## Exit codes
 

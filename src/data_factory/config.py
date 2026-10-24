@@ -23,6 +23,9 @@ DEFAULT_CONFIG_PATH = Path("config/default.json")
 class Settings:
     """Resolved and validated project settings."""
 
+    source_url: str
+    scope_agency: str
+    scope_complaint_types: tuple[str, ...]
     start_date: date
     end_date: date
     batch_size: int
@@ -125,9 +128,33 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Settings:
 
     _reject_unknown_keys(
         data,
-        {"date_range", "fetch", "paths", "quarantine"},
+        {"source", "scope", "date_range", "fetch", "paths", "quarantine"},
         "top level",
     )
+
+    source = _section(data, "source")
+    _reject_unknown_keys(source, {"url"}, "source")
+    source_url = _require(source, "url", "source")
+    if not isinstance(source_url, str) or not source_url.startswith(("http://", "https://")):
+        raise ConfigError(f"config: 'source.url' must be an http(s) URL, got {source_url!r}")
+
+    scope = _section(data, "scope")
+    _reject_unknown_keys(scope, {"agency", "complaint_types"}, "scope")
+    scope_agency = _require(scope, "agency", "scope")
+    if not isinstance(scope_agency, str) or not scope_agency.strip():
+        raise ConfigError(f"config: 'scope.agency' must be a non-empty string, got {scope_agency!r}")
+    raw_types = _require(scope, "complaint_types", "scope")
+    if not isinstance(raw_types, list) or not raw_types:
+        raise ConfigError("config: 'scope.complaint_types' must be a non-empty array")
+    complaint_types: list[str] = []
+    for item in raw_types:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(
+                f"config: 'scope.complaint_types' entries must be non-empty strings, got {item!r}"
+            )
+        if item in complaint_types:
+            raise ConfigError(f"config: 'scope.complaint_types' contains duplicate {item!r}")
+        complaint_types.append(item)
 
     date_range = _section(data, "date_range")
     _reject_unknown_keys(date_range, {"start", "end"}, "date_range")
@@ -169,6 +196,9 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Settings:
     )
 
     return Settings(
+        source_url=source_url,
+        scope_agency=scope_agency,
+        scope_complaint_types=tuple(complaint_types),
         start_date=start_date,
         end_date=end_date,
         batch_size=batch_size,

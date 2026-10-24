@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _settings_as_json(settings: Settings) -> dict[str, Any]:
     return {
+        "source_url": settings.source_url,
+        "scope": {
+            "agency": settings.scope_agency,
+            "complaint_types": list(settings.scope_complaint_types),
+        },
         "start_date": settings.start_date.isoformat(),
         "end_date": settings.end_date.isoformat(),
         "batch_size": settings.batch_size,

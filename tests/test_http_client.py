@@ -141,6 +141,8 @@ class RetryPolicyTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
+                        "source": {"url": "https://data.cityofnewyork.us/resource/erm2-nwe9.json"},
+                        "scope": {"agency": "NYPD", "complaint_types": ["Noise - Park"]},
                         "date_range": {"start": "2023-01-01", "end": "2024-06-30"},
                         "fetch": {
                             "batch_size": 100,
