@@ -4,6 +4,10 @@ data/raw/
 data/curated/
 data/raw_archived/
 
+# Generated delivery folder (AGENTS.md section 6). Built from this tree by
+# scripts/build_delivery.py; the source files are the only copy in git.
+stage-1-kiarash-akbari/
+
 # Virtual environments
 .venv/
 venv/

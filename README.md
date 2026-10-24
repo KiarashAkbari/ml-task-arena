@@ -27,6 +27,12 @@ One command runs the whole factory (`run`, the default); a parameter runs a
 single stage. `--since-last-run` changes *what* is fetched, not which stage
 runs, and is accepted only by `run` / `fetch` (anything else exits 2).
 
+After a full run, open `solution.ipynb` and **Restart Kernel & Run All**: it
+narrates the delivered dataset (provenance, generated data-quality report,
+duration/outlier analysis, per-capita rates, seven claim-backed charts) and
+writes nothing. All analysis logic lives in `src/data_factory/eda.py` and is
+covered by `tests/test_eda.py`.
+
 The fetch stage pages the locked scope into `data/raw/` one batch at a time
 (`fetch_checkpoint.json` records progress), so Ctrl-C anywhere and re-running
 continues where it stopped; re-running a completed fetch makes no HTTP requests.
@@ -129,6 +135,29 @@ with `--config PATH`. Unknown keys are rejected so typos fail fast.
 `paths.raw_archive_dir` (default `data/raw_archived`, derived from the raw
 directory name when omitted) is where `--since-last-run` renames rolled-over
 raw windows; it must not overlap `paths.raw_dir`.
+
+## Notebook (`solution.ipynb`)
+
+The notebook is a *narration* layer, not a second implementation: every number
+it prints comes from `data_factory.eda` (tested offline), it reads only the
+published artifacts (`data/curated/cases.csv` and friends), and it verifies
+the dataset's sha256 against `run_manifest.json` before analysing it.
+
+Paths are relative to the project root, the seed is fixed once (`SEED`), and
+two runs print identical numbers. Run it with **Restart Kernel and Run All**
+and save the outputs — an unexecuted notebook is not accepted (AGENTS §5.2/5.3).
+
+## Delivery folder (AGENTS.md §6)
+
+```bash
+python scripts/build_delivery.py --force
+# -> stage-1-kiarash-akbari/  (notebook, report, README, src, tests, config,
+#                              data/raw, data/curated, requirements, .gitignore)
+```
+
+The folder is generated from this tree, so it cannot drift from the code; it is
+git-ignored here because the source files are the single committed copy. The
+builder warns when the notebook still has no saved outputs.
 
 ## Exit codes
 
