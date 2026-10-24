@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from data_factory import cli
+from data_factory.curate import CurateResult
 from data_factory.errors import EXIT_OK, EXIT_UNEXPECTED
 from data_factory.fetch import FetchResult
 
@@ -68,20 +69,25 @@ class CliStageTests(unittest.TestCase):
         base.update(overrides)
         return FetchResult(**base)  # type: ignore[arg-type]
 
-    def test_default_command_runs_the_fetch_stage(self) -> None:
-        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as run:
-            run.return_value = self._result()
+    def test_default_command_runs_fetch_then_curate(self) -> None:
+        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
+                mock.patch("data_factory.cli.curate_stage.run_curate") as curate:
+            fetch.return_value = self._result()
+            curate.return_value = _curate_result()
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.main([]), EXIT_OK)
-        run.assert_called_once()
+        fetch.assert_called_once()
+        curate.assert_called_once()
 
     def test_fetch_subcommand_runs_fetch_stage_only(self) -> None:
-        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as run:
-            run.return_value = self._result()
+        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
+                mock.patch("data_factory.cli.curate_stage.run_curate") as curate:
+            fetch.return_value = self._result()
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 self.assertEqual(cli.main(["fetch"]), EXIT_OK)
-        run.assert_called_once()
+        fetch.assert_called_once()
+        curate.assert_not_called()
         self.assertIn("10 records", stdout.getvalue())
 
     def test_fetch_summary_prints_real_measured_counts(self) -> None:
@@ -107,6 +113,50 @@ class CliStageTests(unittest.TestCase):
                 cli.main(["fetch"])
         self.assertIn("already complete", stdout.getvalue())
         self.assertIn("0 requests", stdout.getvalue())
+
+
+def _curate_result(**overrides: object) -> CurateResult:
+    base: dict = {
+        "total": 100,
+        "passed": 99,
+        "quarantined": 1,
+        "counts": {"INVALID_ZIP_CODE": 1},
+        "ratio": 0.01,
+        "threshold": 0.05,
+    }
+    base.update(overrides)
+    return CurateResult(**base)  # type: ignore[arg-type]
+
+
+class CurateCliTests(unittest.TestCase):
+    def test_curate_subcommand_runs_curate_stage_only(self) -> None:
+        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
+                mock.patch("data_factory.cli.curate_stage.run_curate") as curate:
+            curate.return_value = _curate_result()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(cli.main(["curate"]), EXIT_OK)
+        fetch.assert_not_called()
+        curate.assert_called_once()
+        summary = stdout.getvalue()
+        self.assertIn("scanned 100", summary)
+        self.assertIn("INVALID_ZIP_CODE: 1", summary)
+
+    def test_curate_summary_printed_before_threshold_failure(self) -> None:
+        """4.3: counts are reported, THEN the run fails with exit 5."""
+        with mock.patch(
+            "data_factory.cli.curate_stage.run_curate"
+        ) as curate:
+            curate.return_value = _curate_result(
+                total=100, passed=90, quarantined=10, ratio=0.10,
+                counts={"INVALID_ZIP_CODE": 10},
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = cli.main(["curate"])
+        self.assertEqual(code, 5)
+        self.assertIn("quarantined 10 (10.00%; threshold 5.00%)", stdout.getvalue())
+        self.assertIn("exceeds threshold", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -14,8 +14,10 @@ import traceback
 from typing import Any
 
 from data_factory import __version__
+from data_factory import curate as curate_stage
 from data_factory import fetch as fetch_stage
 from data_factory.config import DEFAULT_CONFIG_PATH, Settings, load_config
+from data_factory.curate import CurateResult
 from data_factory.errors import (
     EXIT_INTERRUPTED,
     EXIT_OK,
@@ -33,9 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("run", "fetch"),
+        choices=("run", "fetch", "curate"),
         default="run",
-        help="run = the whole pipeline (default); fetch = only the fetch stage",
+        help="run = the whole pipeline (default); fetch / curate = one stage each",
     )
     parser.add_argument(
         "--version",
@@ -72,6 +74,23 @@ def _run_fetch(settings: Settings) -> None:
         f"— {result.http_requests} HTTP request(s); "
         f"peak in-memory batch: {result.peak_in_memory_records:,}"
     )
+
+
+def _print_curate_summary(result: CurateResult) -> None:
+    print(
+        f"curate: scanned {result.total:,} — passed {result.passed:,}, "
+        f"quarantined {result.quarantined:,} ({result.ratio:.2%}; "
+        f"threshold {result.threshold:.2%})"
+    )
+    for code, count in result.counts.items():
+        print(f"  {code}: {count:,}")
+
+
+def _run_curate(settings: Settings) -> None:
+    """Execute the curate stage, report per-reason counts, enforce threshold."""
+    result = curate_stage.run_curate(settings)
+    _print_curate_summary(result)
+    curate_stage.ensure_within_threshold(result)
 
 
 def _settings_as_json(settings: Settings) -> dict[str, Any]:
@@ -111,10 +130,12 @@ def main(argv: list[str] | None = None) -> int:
             payload = {"config_path": args.config, "settings": _settings_as_json(settings)}
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            # Both commands currently run the fetch stage; later stages of the
-            # pipeline are appended to the default "run" command (AGENTS 4.1:
-            # one command = whole factory, a parameter = one part).
-            _run_fetch(settings)
+            # One command = whole factory (run), a parameter = one part
+            # (fetch / curate); later stages append to "run" (AGENTS 4.1).
+            if args.command in ("run", "fetch"):
+                _run_fetch(settings)
+            if args.command in ("run", "curate"):
+                _run_curate(settings)
         return EXIT_OK
     except DataFactoryError as exc:
         print(f"error: {exc}", file=sys.stderr)

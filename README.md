@@ -14,12 +14,16 @@ pip install -e .
 python -m unittest discover   # tests, offline
 data-factory                  # whole pipeline (resumable; stages append over time)
 data-factory fetch            # only the fetch stage
+data-factory curate           # contract gate: quarantine + per-reason counts + threshold
 data-factory --show-config    # resolve and print the active configuration
 ```
 
 The fetch stage pages the locked scope into `data/raw/` one batch at a time
 (`fetch_checkpoint.json` records progress), so Ctrl-C anywhere and re-running
 continues where it stopped; re-running a completed fetch makes no HTTP requests.
+The curate stage never drops data silently: contract violations go to
+`data/curated/quarantine.jsonl` with reason codes, counts are printed every
+run, and a quarantine ratio above `quarantine.max_ratio` fails the run (exit 5).
 
 ## Configuration
 

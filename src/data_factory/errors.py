@@ -42,6 +42,13 @@ class ValidationError(DataFactoryError):
     exit_code = 5
 
 
+class QuarantineThresholdExceeded(ValidationError):
+    """Quarantine ratio is above the configured threshold (AGENTS.md 4.3):
+    the run must fail instead of continuing with suspect data."""
+
+    exit_code = 5  # still a data-validation failure (exit-code contract: 4.1)
+
+
 EXIT_OK = 0
 EXIT_UNEXPECTED = 1
 EXIT_USAGE = 2
