@@ -9,7 +9,13 @@ complaint data:
 
 1. **Population** — U.S. Census Bureau, 2020 Census Demographic and Housing
    Characteristics (DHC), table P1, at ZIP Code Tabulation Area (ZCTA) level,
-   read from the Census API (the ``dec/*`` endpoints need no key).
+   read from the Census API (the ``dec/*`` endpoints need no key). When that
+   host is unreachable — a real run hit a read timeout followed by HTML
+   instead of JSON — the script falls back to **NYC Open Data's Modified
+   ZCTAs** (``data.cityofnewyork.us/resource/pri4-ifjk``), which publishes a
+   population estimate per MODZCTA and the ZIPs each one covers. A MODZCTA
+   that bundles several ZIPs has its population split across them (integer,
+   remainder to the first) so summing the ZIPs can never double-count.
 2. **District** — the NYC ZIP-plan rule (100-102 Manhattan, 103 Staten Island,
    104 Bronx, 112 Brooklyn, 111/113/114/116 Queens). A published rule rather
    than a lookup table, so ``clean``'s ``borough_mismatches`` counter compares
@@ -67,6 +73,13 @@ CENSUS_SOURCES: tuple[tuple[str, str], ...] = (
     ("2010 Census SF1 (P001)",
      "https://api.census.gov/data/2010/dec/sf1"
      "?get=NAME,P001001&for=zip%20code%20tabulation%20area:*"),
+)
+
+#: NYC Open Data "Modified Zip Code Tabulation Areas": population estimate per
+#: MODZCTA plus the ZIP list it covers. Reached over the same host as the 311
+#: source, so it works on networks that block api.census.gov.
+MODZCTA_URL = (
+    "https://data.cityofnewyork.us/resource/pri4-ifjk.json?$limit=50000"
 )
 
 POPULATION_COLUMNS: tuple[str, ...] = (
@@ -215,6 +228,56 @@ def parse_population_csv(text: str) -> dict[str, int]:
     return populations
 
 
+def parse_modzcta_rows(payload: Any) -> dict[str, int]:
+    """``{zip: population}`` from NYC Open Data Modified-ZCTA rows.
+
+    Accepts the Socrata JSON array (``/resource/pri4-ifjk.json``) or the
+    GeoJSON feature collection. A MODZCTA that covers several ZIPs has its
+    population estimate divided equally among them, with the remainder going
+    to the first ZIP, so ``sum(populations)`` equals the published total: the
+    per-borough denominators must not be inflated by counting one MODZCTA
+    once per ZIP.
+
+    Raises:
+        ValueError: The payload has no usable rows.
+    """
+    if isinstance(payload, dict):
+        rows: Any = payload.get("features", [])
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        raise ValueError(f"expected a JSON array or GeoJSON object, got {type(payload).__name__}")
+    if not rows:
+        raise ValueError("MODZCTA payload has no rows")
+
+    populations: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        props = row.get("properties") if isinstance(row.get("properties"), dict) else row
+        modzcta = str(props.get("modzcta") or "").strip()
+        raw_population = str(props.get("pop_est") or "").strip().replace(",", "")
+        try:
+            population = int(float(raw_population))
+        except (TypeError, ValueError):
+            continue
+        if population <= 0:
+            continue
+        zips = [z.strip() for z in str(props.get("zcta") or "").split(",") if z.strip()]
+        if not zips:
+            zips = [modzcta] if FIVE_DIGITS.match(modzcta) else []
+        if not zips:
+            continue
+        base, remainder = divmod(population, len(zips))
+        for index, zip_code in enumerate(zips):
+            share = base + (1 if index < remainder else 0)
+            if share > 0:
+                populations[zip_code] = populations.get(zip_code, 0) + share
+    if not populations:
+        raise ValueError("MODZCTA payload parsed to zero ZIPs with a population")
+    return populations
+
+
 def build_reference(populations: dict[str, int]) -> list[tuple[str, int, str]]:
     """Filter to NYC ZIPs with a usable denominator; sorted by ZIP."""
     rows: list[tuple[str, int, str]] = []
@@ -248,8 +311,14 @@ def write_reference(rows: Iterable[tuple[str, int, str]], path: Path) -> Path:
     return path
 
 
-def fetch_census_populations() -> tuple[str, dict[str, int]]:
-    """Try the Census endpoints in order; return ``(label, populations)``."""
+def fetch_populations() -> tuple[str, str, dict[str, int]]:
+    """Census first, NYC Open Data MODZCTA second; ``(label, source_url, pops)``.
+
+    The Census endpoints are preferred (they publish the full national ZCTA
+    table the README documents). They are unreachable on some networks, so a
+    second, independent public source is tried before giving up — the same
+    host that serves the 311 data, which the factory is already fetching from.
+    """
     import requests  # imported here so --csv/--check work without the network
 
     failures: list[str] = []
@@ -264,11 +333,26 @@ def fetch_census_populations() -> tuple[str, dict[str, int]]:
         except Exception as exc:  # noqa: BLE001 - try the next endpoint
             failures.append(f"{label}: {type(exc).__name__}: {exc}")
             continue
-        return label, populations
+        return label, url, populations
+
+    print("contacting: NYC Open Data Modified ZCTAs (fallback) …", flush=True)
+    try:
+        response = requests.get(MODZCTA_URL, timeout=120)
+        if response.status_code != 200:
+            failures.append(f"NYC MODZCTA: HTTP {response.status_code}")
+        else:
+            return (
+                "NYC Open Data Modified ZCTAs (population estimate)",
+                MODZCTA_URL,
+                parse_modzcta_rows(response.json()),
+            )
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"NYC MODZCTA: {type(exc).__name__}: {exc}")
+
     raise RuntimeError(
-        "every Census endpoint failed:\n  " + "\n  ".join(failures) +
-        "\n\nIf your network blocks api.census.gov, download the 2020 ZCTA "
-        "population table manually and re-run with --csv PATH."
+        "every population source failed:\n  " + "\n  ".join(failures) +
+        "\n\nIf your network blocks these hosts, download a ZCTA population "
+        "table manually and re-run with --csv PATH."
     )
 
 
@@ -378,10 +462,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.csv.read_text(encoding="utf-8-sig")
             )
         else:
-            label, populations = fetch_census_populations()
-            source_url = CENSUS_SOURCES[
-                [name for name, _ in CENSUS_SOURCES].index(label)
-            ][1]
+            label, source_url, populations = fetch_populations()
         rows = build_reference(populations)
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

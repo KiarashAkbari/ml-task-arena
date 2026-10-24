@@ -19,6 +19,7 @@ from scripts.build_population_reference import (
     borough_for_zip,
     build_reference,
     parse_census_rows,
+    parse_modzcta_rows,
     parse_population_csv,
     summarise,
     write_config_metadata,
@@ -103,6 +104,63 @@ class LocalCsvTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             parse_population_csv("a,b\n1,2\n")
         self.assertIn("could not identify", str(ctx.exception))
+
+
+class ModzctaParsingTests(unittest.TestCase):
+    """Fallback source: NYC Open Data Modified ZCTAs (one row per MODZCTA)."""
+
+    def test_single_zip_modzcta_is_taken_as_is(self) -> None:
+        payload = [
+            {"modzcta": "10001", "pop_est": "21142", "zcta": "10001"},
+            {"modzcta": "11201", "pop_est": "58732", "zcta": "11201"},
+        ]
+        self.assertEqual(
+            parse_modzcta_rows(payload), {"10001": 21142, "11201": 58732}
+        )
+
+    def test_multi_zip_modzcta_is_split_without_changing_the_total(self) -> None:
+        """Summing ZIPs must never double-count one MODZCTA (rates depend on it)."""
+        payload = [{"modzcta": "10001", "pop_est": "100", "zcta": "10001,10011,10018"}]
+        parsed = parse_modzcta_rows(payload)
+        self.assertEqual(sorted(parsed), ["10001", "10011", "10018"])
+        self.assertEqual(sum(parsed.values()), 100)          # total preserved
+        self.assertEqual(sorted(parsed.values()), [33, 33, 34])  # remainder to first
+
+    def test_geo_json_feature_collection_is_accepted(self) -> None:
+        payload = {
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "properties": {"modzcta": "10301", "pop_est": 47000,
+                                                   "zcta": "10301"}, "geometry": None},
+            ],
+        }
+        self.assertEqual(parse_modzcta_rows(payload), {"10301": 47000})
+
+    def test_rows_without_population_or_zips_are_skipped(self) -> None:
+        payload = [
+            {"modzcta": "10001", "pop_est": "", "zcta": "10001"},
+            {"modzcta": "10002", "pop_est": "0", "zcta": "10002"},
+            {"modzcta": "10003", "pop_est": "5000", "zcta": ""},  # falls back to modzcta
+        ]
+        self.assertEqual(parse_modzcta_rows(payload), {"10003": 5000})
+
+    def test_empty_payload_is_refused(self) -> None:
+        for payload in ([], {"features": []}, {"error": "unknown dataset"}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                parse_modzcta_rows(payload)
+
+    def test_fallback_output_passes_the_factory_loader(self) -> None:
+        payload = [
+            {"modzcta": "10001", "pop_est": "21142", "zcta": "10001,10011"},
+            {"modzcta": "11201", "pop_est": "58732", "zcta": "11201"},
+            {"modzcta": "11021", "pop_est": "9000", "zcta": "11021"},   # Nassau: dropped
+        ]
+        rows = build_reference(parse_modzcta_rows(payload))
+        self.assertEqual([row[0] for row in rows], ["10001", "10011", "11201"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_reference(rows, Path(tmp) / "zip_population.csv")
+            loaded = load_population(path)
+        self.assertEqual(loaded["11201"].borough, "Brooklyn")
 
 
 class BuildTests(unittest.TestCase):
@@ -205,7 +263,8 @@ class CliBehaviourTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertFalse(target.exists(), "a failed run must not create a partial file")
         message = stderr.getvalue()
-        self.assertIn("every Census endpoint failed", message)
+        self.assertIn("every population source failed", message)
+        self.assertIn("NYC MODZCTA", message)
         self.assertIn("hint:", message)
         self.assertIn("--csv PATH", message)
         self.assertIn("contacting:", stdout.getvalue())

@@ -108,15 +108,27 @@ reference data, not raw 311 dumps), and record its URL + fetch date in
 for the report and manifest.
 
 `scripts/build_population_reference.py` builds exactly that file from two
-sources independent of the 311 data — 2020 Census DHC population by ZCTA, and
-the NYC ZIP-plan rule for the district — then validates the result through the
-same loader `clean` uses:
+sources independent of the 311 data — the population table, and the NYC
+ZIP-plan rule for the district — then validates the result through the same
+loader `clean` uses:
 
 ```bash
 python scripts/build_population_reference.py --write-config
 python scripts/build_population_reference.py --check      # re-validate anytime
 python scripts/build_population_reference.py --csv PATH   # offline/blocked network
+python scripts/build_population_reference.py --url URL    # any published CSV/JSON
 ```
+
+It tries the Census API first (2020 DHC P1 by ZCTA, the full national table).
+If that host is unreachable — a real run got a read timeout followed by HTML
+instead of JSON — it falls back to **NYC Open Data's Modified ZCTAs**
+(`data.cityofnewyork.us/resource/pri4-ifjk`), which publishes a population
+estimate per MODZCTA plus the ZIPs it covers, on the same host as the 311
+source. A MODZCTA bundling several ZIPs has its population split across them
+so the per-borough denominators are never double-counted; that split is the
+one approximation in the file and is reported by the script. Whichever source
+wins is recorded verbatim in `population.source_url`, so the manifest and the
+report always name the source that was actually used.
 
 The 110xx prefix is deliberately excluded (it mixes Queens border ZIPs with
 Nassau County), so a handful of cases keep a null population and show up in
