@@ -2,15 +2,20 @@
 
 ``run_manifest.json`` records, all from artifacts on disk (never invented):
 
-* the received time window and the scope criterion (source, agency, locked
-  complaint-type list) — section 3 requires the criterion in the manifest,
+* the received time window — start, end, and how it was chosen (configured
+  range vs ``--since-last-run``, section 4.8.1) — read from the fetch
+  checkpoint so it always describes the data on disk, plus the list of older
+  raw windows that were archived,
+* the scope criterion (source, agency, locked complaint-type list) — section 3
+  requires the criterion in the manifest,
 * raw record count (fetch checkpoint), passed count, quarantine count with
   per-reason breakdown (quarantine output),
 * fetch budget seeds: total HTTP requests, batches, peak in-memory batch,
 * run start / finish timestamps and the code version,
-* sha256 + size of every curated output file (cases, aggregate, quarantine).
-  The manifest cannot hash itself; its timestamps are metadata — the
-  determinism claim covers the data outputs it lists (documented in README).
+* sha256 + size of every curated output file (cases, aggregate, quarantine,
+  and the generated data-quality report of section 4.8.4). The manifest cannot
+  hash itself; its timestamps are metadata — the determinism claim covers the
+  data outputs it lists (documented in README).
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import hashlib
 import json
 import os
 from collections import Counter
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +35,7 @@ from data_factory.curate import QUARANTINE_NAME
 from data_factory.aggregate import AGGREGATE_NAME
 from data_factory.errors import ValidationError
 from data_factory.fetch import CHECKPOINT_NAME, _load_checkpoint
+from data_factory.quality import DATA_QUALITY_NAME
 
 MANIFEST_NAME = "run_manifest.json"
 _HASH_CHUNK_BYTES = 1 << 20  # 1 MiB chunks: never load a whole output in memory
@@ -44,6 +51,35 @@ def sha256_file(path: Path) -> str:
 
 def _output_entry(path: Path) -> dict[str, Any]:
     return {"sha256": sha256_file(path), "bytes": path.stat().st_size}
+
+
+def _archived_windows(settings: Settings) -> list[dict[str, str]]:
+    """List the raw windows the moving-window feature rolled over (4.8.1).
+
+    Read from the archive directory itself, so the manifest reports evidence
+    that exists rather than what this run believes it did. Entries are named
+    ``<start>__<end>``; anything else in that folder is not ours and is
+    ignored.
+    """
+    archive_root = Path(settings.raw_archive_dir)
+    if not archive_root.is_dir():
+        return []
+    archived: list[dict[str, str]] = []
+    for entry in archive_root.iterdir():
+        if not entry.is_dir():
+            continue
+        start, separator, end = entry.name.partition("__")
+        if not separator:
+            continue
+        try:  # not an ISO-dated window directory -> not created by the factory
+            date.fromisoformat(start)
+            date.fromisoformat(end)
+        except ValueError:
+            continue
+        archived.append(
+            {"start": start, "end": end, "path": entry.as_posix()}
+        )
+    return sorted(archived, key=lambda item: (item["start"], item["end"]))
 
 
 def collect_manifest(
@@ -71,14 +107,15 @@ def collect_manifest(
     quarantine_path = curated_dir / QUARANTINE_NAME
     cases_path = curated_dir / CASES_NAME
     aggregate_path = curated_dir / AGGREGATE_NAME
+    quality_path = curated_dir / DATA_QUALITY_NAME
     missing = [
         str(path)
-        for path in (quarantine_path, cases_path, aggregate_path)
+        for path in (quarantine_path, cases_path, aggregate_path, quality_path)
         if not path.is_file()
     ]
     if missing:
         raise ValidationError(
-            f"missing output(s): {missing} — run curate, clean, and aggregate first"
+            f"missing output(s): {missing} — run curate, clean, and outputs first"
         )
 
     quarantine_records = 0
@@ -104,10 +141,15 @@ def collect_manifest(
 
     return {
         "code_version": __version__,
+        # The window RECEIVED (4.5): taken from the fetch checkpoint, not from
+        # the config, so a moving-window run (4.8.1) can never be reported with
+        # the configured range it did not fetch.
         "window": {
-            "start": settings.start_date.isoformat(),
-            "end": settings.end_date.isoformat(),
+            "start": state["window_start"],
+            "end": state["window_end"],
+            "mode": state["window_mode"],
         },
+        "archived_windows": _archived_windows(settings),
         "scope": {
             "source_url": settings.source_url,
             "agency": settings.scope_agency,
@@ -139,6 +181,7 @@ def collect_manifest(
             CASES_NAME: _output_entry(cases_path),
             AGGREGATE_NAME: _output_entry(aggregate_path),
             QUARANTINE_NAME: _output_entry(quarantine_path),
+            DATA_QUALITY_NAME: _output_entry(quality_path),
         },
     }
 

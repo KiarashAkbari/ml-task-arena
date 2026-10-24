@@ -42,7 +42,8 @@
   },
   "paths": {
     "raw_dir": "data/raw",
-    "curated_dir": "data/curated"
+    "curated_dir": "data/curated",
+    "raw_archive_dir": "data/raw_archived"
   },
   "quarantine": {
     "max_ratio": 0.05

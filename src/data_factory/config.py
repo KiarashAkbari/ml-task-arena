@@ -1,9 +1,11 @@
 """Project configuration: loaded from JSON files outside the code.
 
 Every tunable named in AGENTS.md section 4.1 lives here — date range, batch
-size, paths, retry cap — plus the quarantine-ratio threshold (section 4.3)
-and the HTTP retry/timeout behavior of the fetch layer (section 4.2).
-Loading failures raise :class:`ConfigError` so the CLI can exit with code 3.
+size, paths (including the raw-archive directory used by the moving-window
+feature of section 4.8.1), retry cap — plus the quarantine-ratio threshold
+(section 4.3) and the HTTP retry/timeout behavior of the fetch layer
+(section 4.2). Loading failures raise :class:`ConfigError` so the CLI can
+exit with code 3.
 """
 
 from __future__ import annotations
@@ -54,6 +56,7 @@ class Settings:
     timeout_seconds: float
     raw_dir: Path
     curated_dir: Path
+    raw_archive_dir: Path  # where a rolled-over raw window is renamed to (4.8.1)
     quarantine_max_ratio: float
 
 
@@ -253,9 +256,25 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Settings:
     )
 
     paths = _section(data, "paths")
-    _reject_unknown_keys(paths, {"raw_dir", "curated_dir"}, "paths")
+    _reject_unknown_keys(paths, {"raw_dir", "curated_dir", "raw_archive_dir"}, "paths")
     raw_dir = _parse_path(_require(paths, "raw_dir", "paths"), "paths.raw_dir")
     curated_dir = _parse_path(_require(paths, "curated_dir", "paths"), "paths.curated_dir")
+    # Optional: the moving-window feature (section 4.8.1) RENAMES the raw
+    # directory into the archive instead of deleting it. Absent key -> the raw
+    # directory name plus "_archived" (data/raw -> data/raw_archived), so the
+    # archive always sits beside the data it preserves.
+    if "raw_archive_dir" in paths:
+        raw_archive_dir = _parse_path(paths["raw_archive_dir"], "paths.raw_archive_dir")
+    else:
+        raw_archive_dir = raw_dir.parent / f"{raw_dir.name}_archived"
+    if raw_archive_dir == raw_dir or raw_dir.is_relative_to(raw_archive_dir) or (
+        raw_archive_dir.is_relative_to(raw_dir)
+    ):
+        raise ConfigError(
+            "config: 'paths.raw_archive_dir' must be a directory separate from "
+            f"'paths.raw_dir' (got '{raw_archive_dir}' vs '{raw_dir}'): the moving "
+            "window renames the whole raw directory into it"
+        )
 
     quarantine = _section(data, "quarantine")
     _reject_unknown_keys(quarantine, {"max_ratio"}, "quarantine")
@@ -279,5 +298,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Settings:
         timeout_seconds=timeout_seconds,
         raw_dir=raw_dir,
         curated_dir=curated_dir,
+        raw_archive_dir=raw_archive_dir,
         quarantine_max_ratio=quarantine_max_ratio,
     )

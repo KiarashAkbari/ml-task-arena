@@ -2,6 +2,7 @@
 # The pipeline creates these directories at runtime from an empty folder.
 data/raw/
 data/curated/
+data/raw_archived/
 
 # Virtual environments
 .venv/

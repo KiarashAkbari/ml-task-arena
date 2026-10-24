@@ -5,16 +5,24 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import tempfile
 import unittest
+from datetime import date
+from pathlib import Path
 from unittest import mock
 
 from data_factory import cli
 from data_factory.aggregate import AggregationResult
 from data_factory.clean import CleanResult
+from data_factory.config import load_config
 from data_factory.curate import CurateResult
 from data_factory.errors import EXIT_OK, EXIT_UNEXPECTED
-from data_factory.fetch import FetchResult
+from data_factory.fetch import WINDOW_MODE_SINCE_LAST_RUN, FetchResult, run_fetch
+from data_factory.moving_window import today_utc
 from data_factory.outputs import OutputsResult
+from data_factory.quality import QualityReport
+from tests.test_config import VALID_CONFIG
+from tests.test_curate import ScriptedClient, healthy_record
 
 
 class CliExitCodeTests(unittest.TestCase):
@@ -209,16 +217,30 @@ class CleanCliTests(unittest.TestCase):
         self.assertIn("quarantined 1", summary)
 
 
+def _quality_report(**overrides: object) -> QualityReport:
+    base: dict = {
+        "path": Path("data/curated/data_quality.csv"),
+        "rows": 99,
+        "columns": 11,
+        "emptiest_column": "duration_minutes",
+        "emptiest_pct": 41.41,
+    }
+    base.update(overrides)
+    return QualityReport(**base)  # type: ignore[arg-type]
+
+
 def _outputs_result(**overrides: object) -> OutputsResult:
     base: dict = {
         "aggregate": AggregationResult(
             rows_written=30, months=("2023-01",), districts=("Queens",)
         ),
+        "quality": _quality_report(),
         "manifest_path": "data/curated/run_manifest.json",
         "output_hashes": {
             "cases.csv": "a" * 64,
             "aggregate.csv": "b" * 64,
             "quarantine.jsonl": "c" * 64,
+            "data_quality.csv": "d" * 64,
         },
     }
     base.update(overrides)
@@ -239,8 +261,91 @@ class OutputsCliTests(unittest.TestCase):
         outputs.assert_called_once()
         summary = stdout.getvalue()
         self.assertIn("30 rows x 1 months", summary)
-        self.assertIn("hashed 3 file(s)", summary)
+        self.assertIn("hashed 4 file(s)", summary)
         self.assertIn("cases.csv: sha256", summary)
+        self.assertIn("data_quality.csv profiled 11 column(s) over 99 row(s)", summary)
+        self.assertIn("emptiest column duration_minutes (41.41% empty)", summary)
+
+
+class SinceLastRunCliTests(unittest.TestCase):
+    """``--since-last-run`` wiring: flag validation + real window resolution."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+        self.config_path = self.tmp_path / "config.json"
+
+    def write_config(self, *, end: str = "2024-06-30") -> None:
+        config = json.loads(json.dumps(VALID_CONFIG))
+        config["date_range"] = {"start": "2023-01-01", "end": end}
+        config["paths"] = {
+            "raw_dir": str(self.tmp_path / "raw"),
+            "curated_dir": str(self.tmp_path / "curated"),
+            "raw_archive_dir": str(self.tmp_path / "raw_archived"),
+        }
+        config["population"]["path"] = str(self.tmp_path / "pop.csv")
+        self.config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    def seed_previous_run(self) -> None:
+        settings = load_config(self.config_path)
+        run_fetch(settings, ScriptedClient([healthy_record(i) for i in range(3)]))
+
+    def test_flag_is_rejected_for_read_only_stages(self) -> None:
+        self.write_config()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            cli.main(["outputs", "--since-last-run", "--config", str(self.config_path)])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("applies to the 'run' and 'fetch' commands", stderr.getvalue())
+
+    def test_fetch_resolves_the_window_and_archives_the_previous_raw_data(self) -> None:
+        self.write_config()
+        self.seed_previous_run()
+        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch:
+            fetch.return_value = CliStageTests._result()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = cli.main(
+                    ["fetch", "--since-last-run", "--config", str(self.config_path)]
+                )
+
+        self.assertEqual(code, EXIT_OK)
+        settings, _client = fetch.call_args.args
+        self.assertEqual(settings.start_date, date(2024, 7, 1))
+        self.assertEqual(settings.end_date, today_utc())
+        self.assertEqual(fetch.call_args.kwargs["window_mode"], WINDOW_MODE_SINCE_LAST_RUN)
+
+        archive = self.tmp_path / "raw_archived" / "2023-01-01__2024-06-30"
+        self.assertTrue(archive.is_dir())
+        self.assertFalse((self.tmp_path / "raw").exists())
+        summary = stdout.getvalue()
+        self.assertIn(f"window: since last run — 2024-07-01..{today_utc().isoformat()}", summary)
+        self.assertIn(f"archived the previous raw data to {archive}", summary)
+
+    def test_flag_with_nothing_new_prints_a_noop_and_keeps_the_raw_data(self) -> None:
+        self.write_config(end=today_utc().isoformat())
+        self.seed_previous_run()
+        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch:
+            fetch.return_value = CliStageTests._result(already_complete=True, batches=0)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = cli.main(
+                    ["fetch", "--since-last-run", "--config", str(self.config_path)]
+                )
+
+        self.assertEqual(code, EXIT_OK)
+        self.assertTrue((self.tmp_path / "raw").is_dir())
+        self.assertFalse((self.tmp_path / "raw_archived").exists())
+        self.assertIn("nothing new to fetch", stdout.getvalue())
+
+    def test_flag_without_a_previous_run_exits_with_the_validation_code(self) -> None:
+        self.write_config()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            code = cli.main(["fetch", "--since-last-run", "--config", str(self.config_path)])
+        self.assertEqual(code, 5)
+        self.assertIn("needs a previous run", stderr.getvalue())
 
 
 if __name__ == "__main__":

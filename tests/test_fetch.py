@@ -13,6 +13,7 @@ from data_factory.errors import NetworkError, ValidationError
 from data_factory.fetch import (
     BATCH_NAME_TEMPLATE,
     CHECKPOINT_NAME,
+    WINDOW_MODE_SINCE_LAST_RUN,
     FetchResult,
     compute_fingerprint,
     run_fetch,
@@ -275,6 +276,69 @@ class FingerprintTests(FetchTestBase):
                 dataclasses.replace(base, scope_agency="DSNY")
             ),
         )
+
+    def test_fingerprint_changes_with_the_window(self) -> None:
+        """A moving window (4.8.1) must not silently reuse another window's raw dir."""
+        base = self.settings()
+        shifted = dataclasses.replace(base, start_date=base.start_date.replace(day=2))
+        self.assertNotEqual(compute_fingerprint(base), compute_fingerprint(shifted))
+
+
+class WindowRecordTests(FetchTestBase):
+    """The checkpoint is the window of record for the manifest (4.5 + 4.8.1)."""
+
+    def checkpoint(self, settings) -> dict:  # noqa: ANN001
+        path = settings.raw_dir / CHECKPOINT_NAME
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_window_and_mode_are_recorded(self) -> None:
+        settings = self.settings()
+        run_fetch(settings, FakeFetchClient(5), window_mode=WINDOW_MODE_SINCE_LAST_RUN)
+        state = self.checkpoint(settings)
+        self.assertEqual(state["window_start"], settings.start_date.isoformat())
+        self.assertEqual(state["window_end"], settings.end_date.isoformat())
+        self.assertEqual(state["window_mode"], WINDOW_MODE_SINCE_LAST_RUN)
+
+    def test_resume_preserves_the_window_record(self) -> None:
+        settings = self.settings(batch_size=10)
+        with self.assertRaises(NetworkError):
+            run_fetch(settings, FakeFetchClient(25, fail_at_offset=20))
+        before = self.checkpoint(settings)
+        run_fetch(settings, FakeFetchClient(25))
+        after = self.checkpoint(settings)
+        for key in ("window_start", "window_end", "window_mode"):
+            self.assertEqual(before[key], after[key])
+
+    def test_checkpoint_from_an_older_version_is_refused(self) -> None:
+        settings = self.settings()
+        run_fetch(settings, FakeFetchClient(5))
+        state = self.checkpoint(settings)
+        for key in ("window_start", "window_end", "window_mode"):
+            del state[key]
+        (settings.raw_dir / CHECKPOINT_NAME).write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaises(ValidationError) as ctx:
+            run_fetch(settings, FakeFetchClient(5))
+        message = str(ctx.exception)
+        self.assertIn("incomplete", message)
+        self.assertIn("window_start", message)
+
+    def test_invalid_window_values_are_refused(self) -> None:
+        settings = self.settings()
+        run_fetch(settings, FakeFetchClient(5))
+        good = self.checkpoint(settings)
+        cases = [
+            ({**good, "window_start": "not-a-date"}, "ISO date"),
+            ({**good, "window_start": "2024-07-01", "window_end": "2024-06-30"}, "after"),
+            ({**good, "window_mode": "yesterday"}, "window_mode"),
+        ]
+        for state, expected in cases:
+            with self.subTest(expected=expected):
+                (settings.raw_dir / CHECKPOINT_NAME).write_text(
+                    json.dumps(state), encoding="utf-8"
+                )
+                with self.assertRaises(ValidationError) as ctx:
+                    run_fetch(settings, FakeFetchClient(5))
+                self.assertIn(expected, str(ctx.exception))
 
 
 if __name__ == "__main__":

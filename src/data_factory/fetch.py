@@ -14,6 +14,11 @@ Behavior contract:
 * **Bounded memory** — exactly one batch lives in memory at a time; the peak
   is measured into ``FetchResult.peak_in_memory_records`` (proof for the
   section 4.2 memory-cap requirement).
+* **Window of record** — the checkpoint stores the exact date window the raw
+  data on disk was fetched with (``window_start`` / ``window_end``) and how it
+  was chosen (``window_mode``). The moving-window feature (section 4.8.1) and
+  the run manifest (section 4.5: "the window received") both read it from
+  here, so the manifest can never claim a window the data does not have.
 * **Defined failures** — non-array payload / non-object rows / changed column
   set -> :class:`ValidationError`; HTTP failures propagate as
   :class:`NetworkError` with the checkpoint intact.
@@ -30,6 +35,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +47,11 @@ ORDER_FIELD = "unique_key"
 CHECKPOINT_NAME = "fetch_checkpoint.json"
 BATCH_NAME_TEMPLATE = "batch_{index:06d}.json"
 
+# How the window recorded in a checkpoint was chosen (section 4.8.1).
+WINDOW_MODE_CONFIGURED = "configured"          # date_range from the config file
+WINDOW_MODE_SINCE_LAST_RUN = "since_last_run"  # --since-last-run: last end + 1d .. today
+WINDOW_MODES = (WINDOW_MODE_CONFIGURED, WINDOW_MODE_SINCE_LAST_RUN)
+
 _CHECKPOINT_KEYS = (
     "fingerprint",
     "batches_written",
@@ -49,6 +60,9 @@ _CHECKPOINT_KEYS = (
     "http_requests",
     "columns",
     "complete",
+    "window_start",
+    "window_end",
+    "window_mode",
 )
 
 
@@ -104,9 +118,13 @@ def _load_checkpoint(path: Path, batch_size: int) -> dict[str, Any]:
             "remove the raw directory and re-run to start over"
         ) from exc
     if not isinstance(state, dict) or any(key not in state for key in _CHECKPOINT_KEYS):
+        missing = sorted(
+            set(_CHECKPOINT_KEYS) - set(state) if isinstance(state, dict) else _CHECKPOINT_KEYS
+        )
         raise ValidationError(
-            f"fetch checkpoint '{path}' is incomplete; "
-            "remove the raw directory and re-run to start over"
+            f"fetch checkpoint '{path}' is incomplete (missing {missing}); a "
+            "checkpoint written by an older version of the factory cannot be "
+            "resumed — remove the raw directory and re-run to start over"
         )
     integers = ("batches_written", "next_offset", "records_written", "http_requests",
                 "peak_in_memory_records")
@@ -122,6 +140,30 @@ def _load_checkpoint(path: Path, batch_size: int) -> dict[str, Any]:
         raise ValidationError(f"fetch checkpoint '{path}': 'columns' must be a list of strings")
     if not isinstance(state["complete"], bool):
         raise ValidationError(f"fetch checkpoint '{path}': 'complete' must be a boolean")
+    window: list[date] = []
+    for key in ("window_start", "window_end"):
+        value = state[key]
+        if not isinstance(value, str):
+            raise ValidationError(
+                f"fetch checkpoint '{path}': '{key}' must be an ISO date string"
+            )
+        try:
+            window.append(date.fromisoformat(value))
+        except ValueError as exc:
+            raise ValidationError(
+                f"fetch checkpoint '{path}': '{key}' must be an ISO date string "
+                f"(YYYY-MM-DD), got {value!r}"
+            ) from exc
+    if window[0] > window[1]:
+        raise ValidationError(
+            f"fetch checkpoint '{path}': window_start ({window[0]}) is after "
+            f"window_end ({window[1]})"
+        )
+    if state["window_mode"] not in WINDOW_MODES:
+        raise ValidationError(
+            f"fetch checkpoint '{path}': 'window_mode' must be one of "
+            f"{list(WINDOW_MODES)}, got {state['window_mode']!r}"
+        )
     # Invariants that catch tampering / partial manual edits.
     if state["next_offset"] != state["records_written"]:
         raise ValidationError(
@@ -158,19 +200,35 @@ def _validate_payload(payload: Any, offset: int) -> list[dict[str, Any]]:
     return payload
 
 
-def run_fetch(settings: Settings, client: Any) -> FetchResult:
+def run_fetch(
+    settings: Settings,
+    client: Any,
+    *,
+    window_mode: str = WINDOW_MODE_CONFIGURED,
+) -> FetchResult:
     """Fetch the configured scope into ``settings.raw_dir``, batch by batch.
 
     Args:
-        settings: Resolved project configuration.
+        settings: Resolved project configuration. Its ``start_date`` /
+            ``end_date`` are the window of record for this fetch — the
+            moving-window feature (section 4.8.1) hands ``run_fetch`` a
+            settings object whose dates are already the resolved window.
         client: Any object with ``get(url, params=...)`` and ``request_count``
             (the real :class:`HttpClient` or a test double).
+        window_mode: How the window was chosen — ``WINDOW_MODE_CONFIGURED``
+            (default) or ``WINDOW_MODE_SINCE_LAST_RUN``. Recorded in the
+            checkpoint when it is created and preserved across resumes, so the
+            manifest reports the truth even when a later stage runs alone.
 
     Raises:
         NetworkError: HTTP failures (checkpoint stays resumable).
         ValidationError: Unusable payloads, changed source shape, or raw state
             that does not match the current configuration.
     """
+    if window_mode not in WINDOW_MODES:
+        raise ValidationError(
+            f"window_mode must be one of {list(WINDOW_MODES)}, got {window_mode!r}"
+        )
     where = build_where(settings)
     fingerprint = compute_fingerprint(settings)
     raw_dir = Path(settings.raw_dir)
@@ -185,6 +243,10 @@ def run_fetch(settings: Settings, client: Any) -> FetchResult:
                 "source, or batch size than the current config; restore the old "
                 "config or remove the raw directory to start over"
             )
+        # Resuming keeps the window of record (and how it was chosen) from the
+        # checkpoint: the raw data on disk belongs to that window, whatever the
+        # current invocation asked for. A genuinely different window cannot
+        # reach this point — its fingerprint differs and is rejected above.
         _verify_batch_files(raw_dir, state["batches_written"])
         if state["complete"]:
             return FetchResult(
@@ -212,6 +274,9 @@ def run_fetch(settings: Settings, client: Any) -> FetchResult:
             "peak_in_memory_records": 0,
             "columns": [],
             "complete": False,
+            "window_start": settings.start_date.isoformat(),
+            "window_end": settings.end_date.isoformat(),
+            "window_mode": window_mode,
         }
         resumed_records = 0
 

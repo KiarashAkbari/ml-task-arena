@@ -23,6 +23,7 @@ from data_factory.manifest import (
     write_manifest,
 )
 from data_factory.outputs import run_outputs
+from data_factory.quality import DATA_QUALITY_NAME, run_quality_report
 from tests.test_curate import ScriptedClient, healthy_record
 
 POPULATION_CSV = (
@@ -169,7 +170,11 @@ class ManifestTests(OutputsTestBase):
         )
 
         self.assertEqual(manifest["code_version"], data_factory.__version__)
-        self.assertEqual(manifest["window"], {"start": "2023-01-01", "end": "2024-06-30"})
+        self.assertEqual(
+            manifest["window"],
+            {"start": "2023-01-01", "end": "2024-06-30", "mode": "configured"},
+        )
+        self.assertEqual(manifest["archived_windows"], [])
         self.assertEqual(manifest["scope"]["agency"], "NYPD")
         self.assertEqual(len(manifest["scope"]["complaint_types"]), 6)
         self.assertEqual(manifest["fetch"]["records_raw"], 5)
@@ -188,7 +193,8 @@ class ManifestTests(OutputsTestBase):
 
         curated = Path(settings.curated_dir)
         self.assertEqual(
-            sorted(manifest["outputs"]), [AGGREGATE_NAME, CASES_NAME, QUARANTINE_NAME]
+            sorted(manifest["outputs"]),
+            sorted([AGGREGATE_NAME, CASES_NAME, QUARANTINE_NAME, DATA_QUALITY_NAME]),
         )
         for name, entry in manifest["outputs"].items():
             with self.subTest(output=name):
@@ -215,6 +221,7 @@ class ManifestTests(OutputsTestBase):
         settings = self.settings()
         self.pipeline([record(i) for i in range(5)], settings)
         run_aggregate(settings)
+        run_quality_report(settings)
         cases_path = Path(settings.curated_dir) / CASES_NAME
         lines = cases_path.read_text(encoding="utf-8").splitlines()
         cases_path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
@@ -258,7 +265,12 @@ class DeterminismTests(OutputsTestBase):
             byte_sets.append(
                 {
                     name: (curated / name).read_bytes()
-                    for name in (CASES_NAME, AGGREGATE_NAME, QUARANTINE_NAME)
+                    for name in (
+                        CASES_NAME,
+                        AGGREGATE_NAME,
+                        QUARANTINE_NAME,
+                        DATA_QUALITY_NAME,
+                    )
                 }
             )
 
@@ -272,6 +284,7 @@ class DeterminismTests(OutputsTestBase):
         settings = self.settings()
         self.pipeline([record(0)], settings)
         run_aggregate(settings)
+        run_quality_report(settings)
         manifest = collect_manifest(settings, started_at="s", finished_at="f")
         path = write_manifest(settings, manifest)
         self.assertTrue(path.is_file())

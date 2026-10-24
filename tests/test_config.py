@@ -221,5 +221,62 @@ class LoadConfigTests(unittest.TestCase):
         self.assertGreaterEqual(settings.batch_size, 1)
 
 
+class RawArchiveDirTests(unittest.TestCase):
+    """The archive keeps rolled-over raw windows (AGENTS 4.8.1)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_path = Path(self._tmp.name)
+
+    def _load(self, paths: dict) -> object:
+        config = json.loads(json.dumps(VALID_CONFIG))
+        config["paths"] = paths
+        path = self.tmp_path / "config.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        return load_config(path)
+
+    def test_default_is_derived_from_the_raw_directory(self) -> None:
+        settings = self._load({"raw_dir": "data/raw", "curated_dir": "data/curated"})
+        self.assertEqual(settings.raw_archive_dir, Path("data/raw_archived"))
+        self.assertEqual(
+            self._load({"raw_dir": "scratch/batches", "curated_dir": "c"}).raw_archive_dir,
+            Path("scratch/batches_archived"),
+        )
+
+    def test_explicit_archive_directory_is_used(self) -> None:
+        settings = self._load(
+            {
+                "raw_dir": "data/raw",
+                "curated_dir": "data/curated",
+                "raw_archive_dir": "data/archive",
+            }
+        )
+        self.assertEqual(settings.raw_archive_dir, Path("data/archive"))
+
+    def test_invalid_archive_directory_is_rejected(self) -> None:
+        cases = [
+            ("data/raw", 42),                  # wrong type
+            ("data/raw", ""),                  # empty path
+            ("data/raw", "data/raw"),          # same as raw -> rename onto itself
+            ("data/raw", "data/raw/archive"),  # nested inside raw
+            ("data/raw", "data"),              # raw nested inside archive
+        ]
+        for raw_dir, archive_dir in cases:
+            with self.subTest(archive_dir=archive_dir), self.assertRaises(ConfigError):
+                self._load(
+                    {
+                        "raw_dir": raw_dir,
+                        "curated_dir": "data/curated",
+                        "raw_archive_dir": archive_dir,
+                    }
+                )
+
+    def test_committed_default_config_declares_the_archive(self) -> None:
+        settings = load_config(DEFAULT_CONFIG_PATH)
+        self.assertEqual(settings.raw_archive_dir, Path("data/raw_archived"))
+        self.assertNotEqual(settings.raw_archive_dir, settings.raw_dir)
+
+
 if __name__ == "__main__":
     unittest.main()
