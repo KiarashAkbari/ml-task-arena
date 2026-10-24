@@ -14,6 +14,7 @@ import traceback
 from typing import Any
 
 from data_factory import __version__
+from data_factory import fetch as fetch_stage
 from data_factory.config import DEFAULT_CONFIG_PATH, Settings, load_config
 from data_factory.errors import (
     EXIT_INTERRUPTED,
@@ -21,12 +22,20 @@ from data_factory.errors import (
     EXIT_UNEXPECTED,
     DataFactoryError,
 )
+from data_factory.http_client import HttpClient, RetryPolicy
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="data-factory",
         description="Reproducible NYC 311 dataset factory (Stage 1).",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("run", "fetch"),
+        default="run",
+        help="run = the whole pipeline (default); fetch = only the fetch stage",
     )
     parser.add_argument(
         "--version",
@@ -45,6 +54,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the resolved settings as JSON and exit",
     )
     return parser
+
+
+def _run_fetch(settings: Settings) -> None:
+    """Execute the fetch stage and print its measured summary."""
+    client = HttpClient(RetryPolicy.from_settings(settings))
+    result = fetch_stage.run_fetch(settings, client)
+    if result.already_complete:
+        print(
+            f"fetch: already complete — {result.records:,} records in "
+            f"{result.batches or 'existing'} batches on disk (0 requests)"
+        )
+        return
+    resumed = f", resumed {result.resumed_records:,}" if result.resumed_records else ""
+    print(
+        f"fetch: {result.records:,} records in {result.batches} batch(es){resumed} "
+        f"— {result.http_requests} HTTP request(s); "
+        f"peak in-memory batch: {result.peak_in_memory_records:,}"
+    )
 
 
 def _settings_as_json(settings: Settings) -> dict[str, Any]:
@@ -83,7 +110,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.show_config:
             payload = {"config_path": args.config, "settings": _settings_as_json(settings)}
             print(json.dumps(payload, indent=2, sort_keys=True))
-        # Pipeline stages will run here in later steps.
+        else:
+            # Both commands currently run the fetch stage; later stages of the
+            # pipeline are appended to the default "run" command (AGENTS 4.1:
+            # one command = whole factory, a parameter = one part).
+            _run_fetch(settings)
         return EXIT_OK
     except DataFactoryError as exc:
         print(f"error: {exc}", file=sys.stderr)

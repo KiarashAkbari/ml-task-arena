@@ -24,9 +24,7 @@ class TestPackage(unittest.TestCase):
 
 
 class TestCli(unittest.TestCase):
-    def test_default_run_exits_zero(self):
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main([]), 0)
+    """Default-command behavior is covered in tests/test_cli.py (CliStageTests)."""
 
     def test_version_flag_prints_version(self):
         out = io.StringIO()

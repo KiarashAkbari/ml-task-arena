@@ -12,8 +12,14 @@ pip install -r requirements.txt
 pip install -e .
 
 python -m unittest discover   # tests, offline
+data-factory                  # whole pipeline (resumable; stages append over time)
+data-factory fetch            # only the fetch stage
 data-factory --show-config    # resolve and print the active configuration
 ```
+
+The fetch stage pages the locked scope into `data/raw/` one batch at a time
+(`fetch_checkpoint.json` records progress), so Ctrl-C anywhere and re-running
+continues where it stopped; re-running a completed fetch makes no HTTP requests.
 
 ## Configuration
 
