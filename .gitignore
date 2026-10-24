@@ -22,5 +22,9 @@ dist/
 # Notebooks
 .ipynb_checkpoints/
 
+# Local run artifacts
+fetch.log
+fetch.pid
+
 # OS / editor noise
 .DS_Store

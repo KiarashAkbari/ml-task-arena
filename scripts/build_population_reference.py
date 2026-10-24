@@ -254,6 +254,7 @@ def fetch_census_populations() -> tuple[str, dict[str, int]]:
 
     failures: list[str] = []
     for label, url in CENSUS_SOURCES:
+        print(f"contacting: {label} …", flush=True)
         try:
             response = requests.get(url, timeout=60)
             if response.status_code != 200:
@@ -335,6 +336,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--csv", type=Path, default=None,
                         help="use a locally saved population CSV instead of the Census API")
+    parser.add_argument("--url", default=None,
+                        help="download a population table (CSV, or Census-style JSON) "
+                             "from this URL instead of the built-in Census endpoints; "
+                             "needs a zip/zcta/geoid column and a population column")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
                         help=f"reference file to write (default: {DEFAULT_OUTPUT.relative_to(PROJECT_ROOT)})")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
@@ -353,7 +358,20 @@ def main(argv: list[str] | None = None) -> int:
         return check_reference(args.output)
 
     try:
-        if args.csv is not None:
+        if args.url is not None:
+            import requests
+
+            print(f"downloading: {args.url} …", flush=True)
+            response = requests.get(args.url, timeout=120)
+            response.raise_for_status()
+            text = response.text
+            label = f"URL {args.url}"
+            source_url = args.url
+            if args.url.split("?")[0].endswith(".json") or text.lstrip()[:1] == "[":
+                populations = parse_census_rows(response.json())
+            else:
+                populations = parse_population_csv(text)
+        elif args.csv is not None:
             label = f"local file {args.csv}"
             source_url = ""
             populations = parse_population_csv(
@@ -367,6 +385,15 @@ def main(argv: list[str] | None = None) -> int:
         rows = build_reference(populations)
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if isinstance(exc, RuntimeError):
+            print(
+                "\nhint: no data was written and the config was not touched.\n"
+                "  . behind a proxy/offline? download the table by hand and use\n"
+                "      python scripts/build_population_reference.py --csv PATH --write-config\n"
+                "  . have a direct download link? use\n"
+                "      python scripts/build_population_reference.py --url https://... --write-config",
+                file=sys.stderr,
+            )
         return 1
 
     print(f"source      : {label}")
@@ -378,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     path = write_reference(rows, args.output)
-    print(f"wrote       : {path}")
+    print(f"wrote       : {path} ({path.stat().st_size:,} bytes, {len(rows)} data rows)")
 
     if args.write_config:
         fetched = args.fetched_date or date.today().isoformat()

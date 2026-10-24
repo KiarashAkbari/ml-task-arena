@@ -174,5 +174,76 @@ class ConfigMetadataTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), before)
 
 
+class CliBehaviourTests(unittest.TestCase):
+    """The CLI must never be silent about whether it wrote anything."""
+
+    def test_offline_failure_prints_a_hint_and_writes_nothing(self) -> None:
+        import contextlib
+        import io
+        import sys
+        import types
+
+        from scripts import build_population_reference as builder
+
+        def boom(url, timeout=0):  # noqa: ANN001
+            raise OSError("blocked network")
+
+        module = types.SimpleNamespace(get=boom)
+        original = sys.modules.get("requests")
+        sys.modules["requests"] = module
+        target = Path(tempfile.mkdtemp()) / "never.csv"
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = builder.main(["--output", str(target)])
+        finally:
+            if original is not None:
+                sys.modules["requests"] = original
+            else:
+                sys.modules.pop("requests", None)
+
+        self.assertEqual(code, 1)
+        self.assertFalse(target.exists(), "a failed run must not create a partial file")
+        message = stderr.getvalue()
+        self.assertIn("every Census endpoint failed", message)
+        self.assertIn("hint:", message)
+        self.assertIn("--csv PATH", message)
+        self.assertIn("contacting:", stdout.getvalue())
+
+    def test_url_option_downloads_and_writes_a_csv(self) -> None:
+        import contextlib
+        import io
+        import sys
+        import types
+
+        from scripts import build_population_reference as builder
+
+        class Response:
+            text = "zcta,population\n10001,21142\n11201,58732\n11021,9000\n"
+
+            @staticmethod
+            def raise_for_status() -> None:
+                return None
+
+        module = types.SimpleNamespace(get=lambda url, timeout=0: Response())
+        original = sys.modules.get("requests")
+        sys.modules["requests"] = module
+        target = Path(tempfile.mkdtemp()) / "ref.csv"
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = builder.main(["--url", "https://example.test/pop.csv",
+                                     "--output", str(target)])
+        finally:
+            if original is not None:
+                sys.modules["requests"] = original
+            else:
+                sys.modules.pop("requests", None)
+
+        self.assertEqual(code, 0)
+        lines = target.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "zip,population,borough")
+        self.assertEqual(lines[1:], ["10001,21142,Manhattan", "11201,58732,Brooklyn"])
+
+
 if __name__ == "__main__":
     unittest.main()
