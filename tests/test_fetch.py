@@ -12,6 +12,7 @@ from data_factory.config import Settings, load_config
 from data_factory.errors import NetworkError, ValidationError
 from tests.test_curate import FAKE_SOURCE_FIELDS
 
+from data_factory import fetch
 from data_factory.fetch import (
     BATCH_NAME_TEMPLATE,
     CHECKPOINT_NAME,
@@ -418,6 +419,76 @@ class FingerprintTests(FetchTestBase):
         base = self.settings()
         shifted = dataclasses.replace(base, start_date=base.start_date.replace(day=2))
         self.assertNotEqual(compute_fingerprint(base), compute_fingerprint(shifted))
+
+
+class ProgressTests(FetchTestBase):
+    """A long fetch must show life; reporting must never break it (4.2 UX)."""
+
+    def test_progress_is_reported_every_ten_thousand_records(self) -> None:
+        settings = self.settings(batch_size=10)
+        seen: list[tuple[int, int, int]] = []
+        result = run_fetch(
+            settings,
+            FakeFetchClient(25),
+            on_progress=lambda records, batches, requests: seen.append(
+                (records, batches, requests)
+            ),
+        )
+        self.assertEqual(result.records, 25)
+        self.assertEqual(seen, [], "25 records is below one progress interval")
+
+    def test_progress_fires_on_the_interval_boundary(self) -> None:
+        settings = self.settings(batch_size=10)
+        seen: list[tuple[int, int, int]] = []
+        original = fetch.PROGRESS_EVERY_RECORDS
+        fetch.PROGRESS_EVERY_RECORDS = 20
+        try:
+            run_fetch(
+                settings,
+                FakeFetchClient(50),
+                on_progress=lambda records, batches, requests: seen.append(
+                    (records, batches, requests)
+                ),
+            )
+        finally:
+            fetch.PROGRESS_EVERY_RECORDS = original
+        self.assertEqual([item[0] for item in seen], [20, 40])
+
+    def test_a_failing_progress_hook_never_breaks_the_fetch(self) -> None:
+        """A closed terminal raises BrokenPipeError; the fetch must finish."""
+        settings = self.settings(batch_size=10)
+        original = fetch.PROGRESS_EVERY_RECORDS
+        fetch.PROGRESS_EVERY_RECORDS = 10
+        calls: list[int] = []
+
+        def explode(records: int, batches: int, requests: int) -> None:
+            calls.append(records)
+            raise BrokenPipeError("terminal closed")
+
+        try:
+            result = run_fetch(settings, FakeFetchClient(50), on_progress=explode)
+        finally:
+            fetch.PROGRESS_EVERY_RECORDS = original
+        self.assertEqual(result.records, 50)
+        self.assertEqual(calls, [10], "reporting stops after the first failure")
+
+    def test_progress_does_not_change_the_written_data(self) -> None:
+        plain = self.tmp_path / "plain"
+        with_progress = self.tmp_path / "progress"
+        run_fetch(self.settings(raw_dir=plain), FakeFetchClient(30))
+        run_fetch(
+            self.settings(raw_dir=with_progress),
+            FakeFetchClient(30),
+            on_progress=lambda *args: None,
+        )
+        self.assertEqual(
+            sorted(p.name for p in plain.glob("*.json")),
+            sorted(p.name for p in with_progress.glob("*.json")),
+        )
+        for path in plain.glob("batch_*.json"):
+            self.assertEqual(
+                path.read_bytes(), (with_progress / path.name).read_bytes()
+            )
 
 
 class WindowRecordTests(FetchTestBase):

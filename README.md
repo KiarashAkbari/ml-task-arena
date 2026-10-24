@@ -37,6 +37,15 @@ The fetch stage pages the locked scope into `data/raw/` one batch at a time
 (`fetch_checkpoint.json` records progress), so Ctrl-C anywhere and re-running
 continues where it stopped; re-running a completed fetch makes no HTTP requests.
 
+A full fetch takes hours, so it reports live progress on **stderr** every
+10,000 records (`fetch: 510,000 records — 512 batch(es), 514 HTTP request(s)`);
+stdout keeps only the final summary. To tell "working" from "throttled" from
+"dead", compare `data/raw/fetch_checkpoint.json`'s modification time with
+`ls -l --time-style=full-iso` — it is rewritten after every batch. A page at a
+deep `$offset` can take minutes, and one failing page costs up to ~3.5 minutes
+before it retries (6 attempts × the 30 s timeout plus backoff), so a minute
+without a new batch is normal; ten is not.
+
 **Source shape guard (AGENTS §4.8.2).** A page's key set is *not* a schema:
 Socrata omits a field when every value in that page is null (a live run met
 `vehicle_type` for the first time at page 36). So the guard has two layers:

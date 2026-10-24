@@ -59,6 +59,13 @@ from data_factory.errors import ValidationError
 from data_factory.scope import build_where
 
 ORDER_FIELD = "unique_key"
+
+#: A long fetch prints nothing until it finishes, which makes "working",
+#: "throttled" and "dead" indistinguishable from outside (a real run was
+#: mistaken for stalled at 505,000 records). Progress is reported every
+#: ``PROGRESS_EVERY_RECORDS`` records written — coarse enough to stay out of
+#: the way, fine enough to show life within a minute or two.
+PROGRESS_EVERY_RECORDS = 10_000
 CHECKPOINT_NAME = "fetch_checkpoint.json"
 BATCH_NAME_TEMPLATE = "batch_{index:06d}.json"
 
@@ -348,6 +355,7 @@ def run_fetch(
     client: Any,
     *,
     window_mode: str = WINDOW_MODE_CONFIGURED,
+    on_progress: Any = None,
 ) -> FetchResult:
     """Fetch the configured scope into ``settings.raw_dir``, batch by batch.
 
@@ -362,6 +370,11 @@ def run_fetch(
             (default) or ``WINDOW_MODE_SINCE_LAST_RUN``. Recorded in the
             checkpoint when it is created and preserved across resumes, so the
             manifest reports the truth even when a later stage runs alone.
+        on_progress: Optional ``callable(records, batches, http_requests)``
+            invoked every ``PROGRESS_EVERY_RECORDS`` records. Reporting must
+            never break a multi-hour fetch, so an exception from it (a closed
+            terminal raises ``BrokenPipeError``) disables further reporting and
+            the fetch continues.
 
     Raises:
         NetworkError: HTTP failures (checkpoint stays resumable).
@@ -428,6 +441,7 @@ def run_fetch(
     prior_http_requests = state["http_requests"]
     peak_records = 0
     new_columns: list[str] = []
+    last_progress_mark = state["records_written"] // PROGRESS_EVERY_RECORDS
 
     # Shape guard layer 1 (section 4.8.2): the dataset's declared schema.
     # Runs only when there is work to do — a completed checkpoint stays a
@@ -511,6 +525,18 @@ def run_fetch(
         if len(rows) < settings.batch_size:
             state["complete"] = True
         _save_checkpoint(checkpoint_path, state)
+
+        mark = state["records_written"] // PROGRESS_EVERY_RECORDS
+        if on_progress is not None and mark > last_progress_mark:
+            last_progress_mark = mark
+            try:
+                on_progress(
+                    state["records_written"],
+                    state["batches_written"],
+                    state["http_requests"],
+                )
+            except Exception:  # noqa: BLE001 - never break the fetch for a log line
+                on_progress = None
         if state["complete"]:
             break
 

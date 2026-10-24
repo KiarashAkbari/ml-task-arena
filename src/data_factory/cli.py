@@ -75,10 +75,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _progress_printer():
+    """Live progress on stderr, so stdout stays the machine-readable summary."""
+
+    def report(records: int, batches: int, http_requests: int) -> None:
+        print(
+            f"fetch: {records:,} records — {batches:,} batch(es), "
+            f"{http_requests:,} HTTP request(s)",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    return report
+
+
 def _run_fetch(settings: Settings, *, window_mode: str) -> None:
     """Execute the fetch stage and print its measured summary."""
     client = HttpClient(RetryPolicy.from_settings(settings))
-    result = fetch_stage.run_fetch(settings, client, window_mode=window_mode)
+    result = fetch_stage.run_fetch(
+        settings, client, window_mode=window_mode, on_progress=_progress_printer()
+    )
     if result.schema_audit:
         print(f"source schema: {result.schema_audit}")
     if result.new_columns:
