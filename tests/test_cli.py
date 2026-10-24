@@ -22,9 +22,11 @@ class CliExitCodeTests(unittest.TestCase):
 
     def test_usage_error_exits_with_reserved_code_two(self) -> None:
         """argparse owns code 2 for unknown arguments; main must not swallow it."""
-        with self.assertRaises(SystemExit) as ctx:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
             cli.main(["--definitely-not-a-flag"])
         self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("unrecognized arguments", stderr.getvalue())
 
     def test_version_flag_exits_zero(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()):
