@@ -12,8 +12,26 @@ pip install -r requirements.txt
 pip install -e .
 
 python -m unittest discover   # tests, offline
-data-factory                  # CLI entry point
+data-factory --show-config    # resolve and print the active configuration
 ```
+
+## Configuration
+
+All tunables live outside the code in `config/default.json` (date range, batch size,
+paths, retry cap, quarantine threshold). Point to another file with `--config PATH`.
+Unknown keys are rejected so typos fail fast.
+
+## Exit codes
+
+| code | meaning |
+|------|---------|
+| 0 | success |
+| 1 | unspecified failure / unexpected bug |
+| 2 | command-line usage error (argparse) |
+| 3 | configuration error |
+| 4 | network / HTTP error |
+| 5 | data validation error |
+| 130 | interrupted (SIGINT) |
 
 Exact dependency pins live in `requirements.txt` (kept in sync with `pyproject.toml`).
 Data directories (`data/raw/`, `data/curated/`) are created by the pipeline itself and are never committed.

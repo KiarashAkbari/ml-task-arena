@@ -1,0 +1,17 @@
+{
+  "date_range": {
+    "start": "2023-01-01",
+    "end": "2024-06-30"
+  },
+  "fetch": {
+    "batch_size": 1000,
+    "max_retries": 5
+  },
+  "paths": {
+    "raw_dir": "data/raw",
+    "curated_dir": "data/curated"
+  },
+  "quarantine": {
+    "max_ratio": 0.05
+  }
+}
