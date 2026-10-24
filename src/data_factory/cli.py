@@ -11,12 +11,14 @@ import argparse
 import json
 import sys
 import traceback
+from datetime import datetime, timezone
 from typing import Any
 
 from data_factory import __version__
 from data_factory import curate as curate_stage
 from data_factory import fetch as fetch_stage
 from data_factory import clean as clean_stage
+from data_factory import outputs as outputs_stage
 from data_factory.config import DEFAULT_CONFIG_PATH, Settings, load_config
 from data_factory.curate import CurateResult
 from data_factory.clean import CleanResult
@@ -37,9 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("run", "fetch", "curate", "clean"),
+        choices=("run", "fetch", "curate", "clean", "outputs"),
         default="run",
-        help="run = the whole pipeline (default); fetch / curate / clean = one stage each",
+        help="run = the whole pipeline (default); "
+             "fetch / curate / clean / outputs = one stage each",
     )
     parser.add_argument(
         "--version",
@@ -107,6 +110,22 @@ def _run_clean(settings: Settings) -> None:
     )
 
 
+def _run_outputs(settings: Settings, *, started_at: str) -> None:
+    """Execute the outputs stage (aggregate + manifest) with a real summary."""
+    finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    result = outputs_stage.run_outputs(
+        settings, started_at=started_at, finished_at=finished_at
+    )
+    agg = result.aggregate
+    print(
+        f"outputs: {agg.rows_written} rows x {len(agg.months)} months "
+        f"across {len(agg.districts)} district(s) -> aggregate.csv; "
+        f"run_manifest.json hashed {len(result.output_hashes)} file(s)"
+    )
+    for name, digest in sorted(result.output_hashes.items()):
+        print(f"  {name}: sha256 {digest[:12]}…")
+
+
 def _settings_as_json(settings: Settings) -> dict[str, Any]:
     return {
         "source_url": settings.source_url,
@@ -154,14 +173,17 @@ def main(argv: list[str] | None = None) -> int:
             payload = {"config_path": args.config, "settings": _settings_as_json(settings)}
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            # One command = whole factory (run), a parameter = one part
-            # (fetch / curate); later stages append to "run" (AGENTS 4.1).
+            # One command = whole factory (run), a parameter = one part;
+            # later stages append to "run" (AGENTS 4.1).
+            started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             if args.command in ("run", "fetch"):
                 _run_fetch(settings)
             if args.command in ("run", "curate"):
                 _run_curate(settings)
             if args.command in ("run", "clean"):
                 _run_clean(settings)
+            if args.command in ("run", "outputs"):
+                _run_outputs(settings, started_at=started_at)
         return EXIT_OK
     except DataFactoryError as exc:
         print(f"error: {exc}", file=sys.stderr)

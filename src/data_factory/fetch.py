@@ -108,7 +108,8 @@ def _load_checkpoint(path: Path, batch_size: int) -> dict[str, Any]:
             f"fetch checkpoint '{path}' is incomplete; "
             "remove the raw directory and re-run to start over"
         )
-    integers = ("batches_written", "next_offset", "records_written", "http_requests")
+    integers = ("batches_written", "next_offset", "records_written", "http_requests",
+                "peak_in_memory_records")
     for key in integers:
         value = state[key]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -191,7 +192,7 @@ def run_fetch(settings: Settings, client: Any) -> FetchResult:
                 batches=0,
                 http_requests=0,
                 resumed_records=state["records_written"],
-                peak_in_memory_records=0,
+                peak_in_memory_records=state["peak_in_memory_records"],
                 already_complete=True,
             )
         resumed_records = state["records_written"]
@@ -208,6 +209,7 @@ def run_fetch(settings: Settings, client: Any) -> FetchResult:
             "next_offset": 0,
             "records_written": 0,
             "http_requests": 0,
+            "peak_in_memory_records": 0,
             "columns": [],
             "complete": False,
         }
@@ -234,12 +236,18 @@ def run_fetch(settings: Settings, client: Any) -> FetchResult:
             # Persist request accounting even when the attempt fails or is
             # interrupted, so the section 4.8.3 budget stays truthful.
             state["http_requests"] = prior_http_requests + client.request_count
+            state["peak_in_memory_records"] = max(
+                state["peak_in_memory_records"], peak_records
+            )
             _save_checkpoint(checkpoint_path, state)
             raise
         rows = _validate_payload(payload, offset)
         if not rows:
             state["complete"] = True
             state["http_requests"] = prior_http_requests + client.request_count
+            state["peak_in_memory_records"] = max(
+                state["peak_in_memory_records"], peak_records
+            )
             _save_checkpoint(checkpoint_path, state)
             break
 
@@ -264,6 +272,9 @@ def run_fetch(settings: Settings, client: Any) -> FetchResult:
         state["next_offset"] += len(rows)
         state["records_written"] += len(rows)
         state["http_requests"] = prior_http_requests + client.request_count
+        state["peak_in_memory_records"] = max(
+            state["peak_in_memory_records"], peak_records
+        )
         if len(rows) < settings.batch_size:
             state["complete"] = True
         _save_checkpoint(checkpoint_path, state)

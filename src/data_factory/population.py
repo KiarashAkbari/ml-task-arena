@@ -1,4 +1,4 @@
-"""Population reference source: ZIP -> population (+ optional borough).
+"""Population reference source: ZIP -> population -> district.
 
 AGENTS.md section 3: an independent public reference table enters the factory
 as its own source and provides the population denominator. Finding and
@@ -6,14 +6,15 @@ validating that source is part of the challenge — the student downloads it to
 ``population.path`` (committed as small reference data, unlike raw 311 dumps)
 and records its URL and fetch date in config for the report and manifest.
 
-Accepted CSV format (README documents it):
+Required CSV format (README documents it):
 
-* required columns ``zip,population``
-* optional column ``borough`` — enables the section 3 cross-check of the
-  reference's district against the 311 ``borough`` column; county names are
-  normalized (KINGS -> Brooklyn etc.) before comparison
+* columns ``zip,population,borough`` — ``borough`` feeds BOTH the section 3
+  cross-check against 311's own borough column AND the population-normalized
+  rates of the aggregate table (section 4.5); county names are normalized
+  (KINGS -> Brooklyn etc.)
 * ZIPs unique (the loader rejects duplicates so the join can never fan out
-  and change row counts), population a positive integer
+  and change row counts), population a positive integer, every row classified
+  into a district (an unclassified ZIP would silently vanish from denominators)
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ from pathlib import Path
 
 from data_factory.errors import ValidationError
 
-REQUIRED_COLUMNS = ("zip", "population")
-OPTIONAL_COLUMNS = ("borough",)
+REQUIRED_COLUMNS = ("zip", "population", "borough")
+OPTIONAL_COLUMNS: tuple[str, ...] = ()
 ALLOWED_COLUMNS = frozenset(REQUIRED_COLUMNS + OPTIONAL_COLUMNS)
 
 # County-name -> NYC borough, for reference sources published per county.
@@ -105,7 +106,13 @@ def load_population(path: str | Path) -> dict[str, PopulationRow]:
                     f"population reference line {line}: 'population' must be a "
                     f"positive integer, got {population_value!r}"
                 )
-            borough = normalize_borough(raw.get("borough"))
+            borough_raw = (raw.get("borough") or "").strip()
+            if not borough_raw:
+                raise ValidationError(
+                    f"population reference line {line}: 'borough' is required "
+                    "(rates and the district cross-check need every ZIP classified)"
+                )
+            borough = normalize_borough(borough_raw)
             rows[zip_value] = PopulationRow(
                 zip_code=zip_value,
                 population=int(population_value),

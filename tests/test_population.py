@@ -14,7 +14,7 @@ VALID_CSV = (
     "11101,30000,Queens\n"
     "10001,25000,New York\n"      # county name -> Manhattan
     "11201,20000,Kings\n"         # county name -> Brooklyn
-    "10002,18000,\n"              # borough optional/empty
+    "10002,18000,Bronx\n"
 )
 
 
@@ -36,7 +36,7 @@ class LoadPopulationTests(unittest.TestCase):
         self.assertEqual(rows["11101"].borough, "Queens")
         self.assertEqual(rows["10001"].borough, "Manhattan")  # New York county
         self.assertEqual(rows["11201"].borough, "Brooklyn")   # Kings county
-        self.assertIsNone(rows["10002"].borough)
+        self.assertEqual(rows["10002"].borough, "Bronx")
 
     def test_missing_file_points_to_readme(self) -> None:
         with self.assertRaises(ValidationError) as ctx:
@@ -52,29 +52,36 @@ class LoadPopulationTests(unittest.TestCase):
 
     def test_bad_zip_values_rejected(self) -> None:
         for bad_zip in ("1001", "abcde", "10001.0", "  "):
-            content = f"zip,population\n{bad_zip},100\n"
+            content = f"zip,population,borough\n{bad_zip},100,Queens\n"
             with self.subTest(zip=bad_zip), self.assertRaises(ValidationError):
                 load_population(self._write(content))
 
     def test_bad_population_values_rejected(self) -> None:
         for bad_pop in ("0", "-5", "25,000", "many"):
             # Quoted so the CSV parser keeps the comma as part of the value.
-            content = f'zip,population\n10001,"{bad_pop}"\n'
+            content = f'zip,population,borough\n10001,"{bad_pop}",Queens\n'
             with self.subTest(population=bad_pop), self.assertRaises(ValidationError):
                 load_population(self._write(content))
 
     def test_duplicate_zip_rejected_to_protect_join_cardinality(self) -> None:
-        content = "zip,population\n10001,100\n10001,200\n"
+        content = "zip,population,borough\n10001,100,Queens\n10001,200,Queens\n"
         with self.assertRaises(ValidationError) as ctx:
             load_population(self._write(content))
         self.assertIn("duplicate zip", str(ctx.exception))
 
     def test_header_only_file_rejected(self) -> None:
         with self.assertRaises(ValidationError):
-            load_population(self._write("zip,population\n"))
+            load_population(self._write("zip,population,borough\n"))
+
+    def test_unclassified_zip_rejected(self) -> None:
+        """Every ZIP must map to a district or it vanishes from rates silently."""
+        content = "zip,population,borough\n10001,100,\n"
+        with self.assertRaises(ValidationError) as ctx:
+            load_population(self._write(content))
+        self.assertIn("borough", str(ctx.exception))
 
     def test_utf8_bom_header_accepted(self) -> None:
-        path = self._write("﻿zip,population\n10001,100\n")
+        path = self._write("\ufeffzip,population,borough\n10001,100,Queens\n")
         rows = load_population(path)
         self.assertEqual(rows["10001"].population, 100)
 

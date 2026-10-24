@@ -16,6 +16,7 @@ data-factory                  # whole pipeline (resumable; stages append over ti
 data-factory fetch            # only the fetch stage
 data-factory curate           # contract gate: quarantine + per-reason counts + threshold
 data-factory clean            # cleaning + population join -> data/curated/cases.csv
+data-factory outputs          # wide aggregate + run_manifest.json (with output hashes)
 data-factory --show-config    # resolve and print the active configuration
 ```
 
@@ -36,7 +37,9 @@ zip,population,borough
 10001,25000,Manhattan
 ```
 
-(`borough` optional — county names like `Kings` are normalized automatically),
+(all three columns required — `borough` feeds both the section 3 district
+cross-check and the population rates of the aggregate table; county names like
+`Kings` are normalized automatically),
 save it as `data/reference/zip_population.csv`, commit it (it is small
 reference data, not raw 311 dumps), and record its URL + fetch date in
 `config/default.json` under `population.source_url` / `population.fetched_date`
@@ -53,6 +56,24 @@ curl -sS 'https://data.cityofnewyork.us/resource/erm2-nwe9.json?$limit=1'
 ```
 
 If a raw name differs, fix it in config — no code changes (AGENTS.md §1).
+
+## Determinism check (AGENTS.md §4.5)
+
+Two independent runs on the same window must list **identical `outputs`
+hashes** in `run_manifest.json` (the manifest's own `started_at` /
+`finished_at` are metadata and differ by design):
+
+```bash
+data-factory run && cp data/curated/run_manifest.json /tmp/run1.json
+data-factory run   # fetch is a no-op; curate/clean/outputs re-emit identical bytes
+python - <<'EOF'
+import json, sys
+a = json.load(open('/tmp/run1.json'))['outputs']
+b = json.load(open('data/curated/run_manifest.json'))['outputs']
+print('MATCH' if a == b else f'MISMATCH\n{a}\n{b}')
+sys.exit(0 if a == b else 1)
+EOF
+```
 
 ## Configuration
 

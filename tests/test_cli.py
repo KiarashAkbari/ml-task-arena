@@ -9,10 +9,12 @@ import unittest
 from unittest import mock
 
 from data_factory import cli
+from data_factory.aggregate import AggregationResult
 from data_factory.clean import CleanResult
 from data_factory.curate import CurateResult
 from data_factory.errors import EXIT_OK, EXIT_UNEXPECTED
 from data_factory.fetch import FetchResult
+from data_factory.outputs import OutputsResult
 
 
 class CliExitCodeTests(unittest.TestCase):
@@ -70,23 +72,27 @@ class CliStageTests(unittest.TestCase):
         base.update(overrides)
         return FetchResult(**base)  # type: ignore[arg-type]
 
-    def test_default_command_runs_fetch_then_curate_then_clean(self) -> None:
+    def test_default_command_runs_all_four_stages(self) -> None:
         with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
                 mock.patch("data_factory.cli.curate_stage.run_curate") as curate, \
-                mock.patch("data_factory.cli.clean_stage.run_clean") as clean:
+                mock.patch("data_factory.cli.clean_stage.run_clean") as clean, \
+                mock.patch("data_factory.cli.outputs_stage.run_outputs") as outputs:
             fetch.return_value = self._result()
             curate.return_value = _curate_result()
             clean.return_value = _clean_result()
+            outputs.return_value = _outputs_result()
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.main([]), EXIT_OK)
         fetch.assert_called_once()
         curate.assert_called_once()
         clean.assert_called_once()
+        outputs.assert_called_once()
 
     def test_fetch_subcommand_runs_fetch_stage_only(self) -> None:
         with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
                 mock.patch("data_factory.cli.curate_stage.run_curate") as curate, \
-                mock.patch("data_factory.cli.clean_stage.run_clean") as clean:
+                mock.patch("data_factory.cli.clean_stage.run_clean") as clean, \
+                mock.patch("data_factory.cli.outputs_stage.run_outputs") as outputs:
             fetch.return_value = self._result()
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
@@ -94,6 +100,7 @@ class CliStageTests(unittest.TestCase):
         fetch.assert_called_once()
         curate.assert_not_called()
         clean.assert_not_called()
+        outputs.assert_not_called()
         self.assertIn("10 records", stdout.getvalue())
 
     def test_fetch_summary_prints_real_measured_counts(self) -> None:
@@ -186,7 +193,8 @@ class CleanCliTests(unittest.TestCase):
     def test_clean_subcommand_runs_clean_stage_only(self) -> None:
         with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
                 mock.patch("data_factory.cli.curate_stage.run_curate") as curate, \
-                mock.patch("data_factory.cli.clean_stage.run_clean") as clean:
+                mock.patch("data_factory.cli.clean_stage.run_clean") as clean, \
+                mock.patch("data_factory.cli.outputs_stage.run_outputs") as outputs:
             clean.return_value = _clean_result()
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
@@ -194,10 +202,45 @@ class CleanCliTests(unittest.TestCase):
         fetch.assert_not_called()
         curate.assert_not_called()
         clean.assert_called_once()
+        outputs.assert_not_called()
         summary = stdout.getvalue()
         self.assertIn("wrote 99 rows", summary)
         self.assertIn("borough mismatches 2", summary)
         self.assertIn("quarantined 1", summary)
+
+
+def _outputs_result(**overrides: object) -> OutputsResult:
+    base: dict = {
+        "aggregate": AggregationResult(
+            rows_written=30, months=("2023-01",), districts=("Queens",)
+        ),
+        "manifest_path": "data/curated/run_manifest.json",
+        "output_hashes": {
+            "cases.csv": "a" * 64,
+            "aggregate.csv": "b" * 64,
+            "quarantine.jsonl": "c" * 64,
+        },
+    }
+    base.update(overrides)
+    return OutputsResult(**base)  # type: ignore[arg-type]
+
+
+class OutputsCliTests(unittest.TestCase):
+    def test_outputs_subcommand_runs_outputs_stage_only(self) -> None:
+        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
+                mock.patch("data_factory.cli.clean_stage.run_clean") as clean, \
+                mock.patch("data_factory.cli.outputs_stage.run_outputs") as outputs:
+            outputs.return_value = _outputs_result()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(cli.main(["outputs"]), EXIT_OK)
+        fetch.assert_not_called()
+        clean.assert_not_called()
+        outputs.assert_called_once()
+        summary = stdout.getvalue()
+        self.assertIn("30 rows x 1 months", summary)
+        self.assertIn("hashed 3 file(s)", summary)
+        self.assertIn("cases.csv: sha256", summary)
 
 
 if __name__ == "__main__":
