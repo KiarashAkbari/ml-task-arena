@@ -198,6 +198,19 @@ Paths are relative to the project root, the seed is fixed once (`SEED`), and
 two runs print identical numbers. Run it with **Restart Kernel and Run All**
 and save the outputs — an unexecuted notebook is not accepted (AGENTS §5.2/5.3).
 
+```bash
+jupyter nbconvert --to notebook --execute --inplace solution.ipynb   # preferred
+python scripts/execute_notebook.py                                  # Jupyter-free fallback
+```
+
+`scripts/execute_notebook.py` exists for environments where Jupyter cannot be
+installed (a blocked PyPI, in one real case). It executes the cells in order in
+a fresh interpreter — the same semantics as *Restart & Run All* — and writes
+genuine `execution_count`s (`1..N`), stream outputs, and figures as base64
+PNGs, so the delivered file opens and re-runs identically in Jupyter. It
+reports how many cells and figures it captured and fails with a non-zero exit
+if any cell raises, leaving the notebook written up to that cell.
+
 ## Delivery folder (AGENTS.md §6)
 
 ```bash
