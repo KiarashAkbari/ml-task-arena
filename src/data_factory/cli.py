@@ -16,8 +16,10 @@ from typing import Any
 from data_factory import __version__
 from data_factory import curate as curate_stage
 from data_factory import fetch as fetch_stage
+from data_factory import clean as clean_stage
 from data_factory.config import DEFAULT_CONFIG_PATH, Settings, load_config
 from data_factory.curate import CurateResult
+from data_factory.clean import CleanResult
 from data_factory.errors import (
     EXIT_INTERRUPTED,
     EXIT_OK,
@@ -35,9 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("run", "fetch", "curate"),
+        choices=("run", "fetch", "curate", "clean"),
         default="run",
-        help="run = the whole pipeline (default); fetch / curate = one stage each",
+        help="run = the whole pipeline (default); fetch / curate / clean = one stage each",
     )
     parser.add_argument(
         "--version",
@@ -93,9 +95,31 @@ def _run_curate(settings: Settings) -> None:
     curate_stage.ensure_within_threshold(result)
 
 
+def _run_clean(settings: Settings) -> None:
+    """Execute the clean + join stage and print its measured summary."""
+    result = clean_stage.run_clean(settings)
+    print(
+        f"clean: wrote {result.rows_written:,} rows "
+        f"(scanned {result.rows_scanned:,}, quarantined {result.rows_skipped:,}); "
+        f"zip matched {result.zip_matched:,}, missing {result.zip_missing:,}, "
+        f"unknown {result.zip_unknown:,}; borough mismatches "
+        f"{result.borough_mismatches:,}; null durations {result.duration_nulls:,}"
+    )
+
+
 def _settings_as_json(settings: Settings) -> dict[str, Any]:
     return {
         "source_url": settings.source_url,
+        "source_field_map": dict(settings.source_field_map),
+        "population": {
+            "path": settings.population_path.as_posix(),
+            "source_url": settings.population_source_url,
+            "fetched_date": (
+                settings.population_fetched_date.isoformat()
+                if settings.population_fetched_date
+                else None
+            ),
+        },
         "scope": {
             "agency": settings.scope_agency,
             "complaint_types": list(settings.scope_complaint_types),
@@ -136,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
                 _run_fetch(settings)
             if args.command in ("run", "curate"):
                 _run_curate(settings)
+            if args.command in ("run", "clean"):
+                _run_clean(settings)
         return EXIT_OK
     except DataFactoryError as exc:
         print(f"error: {exc}", file=sys.stderr)

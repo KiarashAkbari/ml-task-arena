@@ -18,12 +18,32 @@ from data_factory.errors import ConfigError
 
 DEFAULT_CONFIG_PATH = Path("config/default.json")
 
+# Canonical fields the pipeline consumes -> must be present in source.field_map.
+# The raw field names they map to are config, not code (AGENTS.md section 1:
+# a new source must plug in without rewriting validation).
+REQUIRED_FIELD_MAP_KEYS: tuple[str, ...] = (
+    "unique_key",
+    "created_date",
+    "closed_date",
+    "agency",
+    "complaint_type",
+    "borough",
+    "zip_code",
+    "status",
+    "incident_address",
+    "descriptor",
+)
+
 
 @dataclass(frozen=True)
 class Settings:
     """Resolved and validated project settings."""
 
     source_url: str
+    source_field_map: dict[str, str]
+    population_path: Path
+    population_source_url: str  # "" until the student fills in the chosen source
+    population_fetched_date: date | None  # None until filled in
     scope_agency: str
     scope_complaint_types: tuple[str, ...]
     start_date: date
@@ -128,15 +148,63 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Settings:
 
     _reject_unknown_keys(
         data,
-        {"source", "scope", "date_range", "fetch", "paths", "quarantine"},
+        {"source", "population", "scope", "date_range", "fetch", "paths", "quarantine"},
         "top level",
     )
 
     source = _section(data, "source")
-    _reject_unknown_keys(source, {"url"}, "source")
+    _reject_unknown_keys(source, {"url", "field_map"}, "source")
     source_url = _require(source, "url", "source")
     if not isinstance(source_url, str) or not source_url.startswith(("http://", "https://")):
         raise ConfigError(f"config: 'source.url' must be an http(s) URL, got {source_url!r}")
+    raw_field_map = _require(source, "field_map", "source")
+    if not isinstance(raw_field_map, dict):
+        raise ConfigError("config: 'source.field_map' must be a JSON object")
+    field_map_keys = set(raw_field_map)
+    required_keys = set(REQUIRED_FIELD_MAP_KEYS)
+    if field_map_keys != required_keys:
+        missing = sorted(required_keys - field_map_keys)
+        unknown = sorted(field_map_keys - required_keys)
+        details = []
+        if missing:
+            details.append(f"missing {missing}")
+        if unknown:
+            details.append(f"unknown {unknown}")
+        raise ConfigError(f"config: 'source.field_map' must define exactly the required keys ({'; '.join(details)})")
+    source_field_map: dict[str, str] = {}
+    for canonical, raw_name in raw_field_map.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ConfigError(
+                f"config: 'source.field_map.{canonical}' must be a non-empty string, got {raw_name!r}"
+            )
+        source_field_map[canonical] = raw_name
+
+    population = _section(data, "population")
+    _reject_unknown_keys(population, {"path", "source_url", "fetched_date"}, "population")
+    population_path_raw = _require(population, "path", "population")
+    if not isinstance(population_path_raw, str) or not population_path_raw.strip():
+        raise ConfigError(
+            f"config: 'population.path' must be a non-empty relative path, got {population_path_raw!r}"
+        )
+    population_source_url = _require(population, "source_url", "population")
+    if not isinstance(population_source_url, str):
+        raise ConfigError(f"config: 'population.source_url' must be a string, got {population_source_url!r}")
+    if population_source_url and not population_source_url.startswith(("http://", "https://")):
+        raise ConfigError(
+            f"config: 'population.source_url' must be empty or an http(s) URL, got {population_source_url!r}"
+        )
+    population_fetched_raw = _require(population, "fetched_date", "population")
+    if not isinstance(population_fetched_raw, str):
+        raise ConfigError(f"config: 'population.fetched_date' must be a string, got {population_fetched_raw!r}")
+    population_fetched_date: date | None = None
+    if population_fetched_raw:
+        try:
+            population_fetched_date = date.fromisoformat(population_fetched_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                f"config: 'population.fetched_date' must be empty or ISO YYYY-MM-DD, "
+                f"got {population_fetched_raw!r}"
+            ) from exc
 
     scope = _section(data, "scope")
     _reject_unknown_keys(scope, {"agency", "complaint_types"}, "scope")
@@ -197,6 +265,10 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Settings:
 
     return Settings(
         source_url=source_url,
+        source_field_map=source_field_map,
+        population_path=Path(population_path_raw),
+        population_source_url=population_source_url,
+        population_fetched_date=population_fetched_date,
         scope_agency=scope_agency,
         scope_complaint_types=tuple(complaint_types),
         start_date=start_date,

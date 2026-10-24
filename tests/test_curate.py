@@ -28,8 +28,9 @@ def healthy_record(index: int) -> dict:
         "agency": "NYPD",
         "complaint_type": "Noise - Residential",
         "borough": "Queens",
-        "zip_code": "11101",
+        "incident_zip": "11101",
         "status": "Closed",
+        "incident_address": f"{index} MAIN ST",
     }
 
 
@@ -93,8 +94,8 @@ class CuratePartitionTests(CurateTestBase):
 
     def test_violators_are_quarantined_with_record_and_reasons(self) -> None:
         settings = self.settings(threshold=0.5)
-        bad_zip = {**healthy_record(0), "zip_code": "00000"}
-        bad_date = {**healthy_record(1), "created_date": "garbage"}
+        bad_zip = {**healthy_record(0), "unique_key": "2000", "incident_zip": "00000"}
+        bad_date = {**healthy_record(1), "unique_key": "2001", "created_date": "garbage"}
         records = [healthy_record(i) for i in range(8)] + [bad_zip, bad_date]
         self.fetch_records(settings, records)
         result = run_curate(settings)
@@ -110,13 +111,13 @@ class CuratePartitionTests(CurateTestBase):
         lines = self.quarantine_lines(settings)
         self.assertEqual(len(lines), 2)
         by_code = {line["reasons"][0]: line for line in lines}
-        self.assertEqual(by_code["INVALID_ZIP_CODE"]["record"]["unique_key"], "1000")
-        self.assertEqual(by_code["INVALID_CREATED_DATE"]["record"]["unique_key"], "1001")
+        self.assertEqual(by_code["INVALID_ZIP_CODE"]["record"]["unique_key"], "2000")
+        self.assertEqual(by_code["INVALID_CREATED_DATE"]["record"]["unique_key"], "2001")
 
     def test_counts_count_records_per_reason(self) -> None:
         settings = self.settings(threshold=1.0)
         records = [
-            {**healthy_record(i), "unique_key": None, "zip_code": "00000"}
+            {**healthy_record(i), "unique_key": None, "incident_zip": "00000"}
             for i in range(3)
         ] + [healthy_record(99)]
         self.fetch_records(settings, records)
@@ -125,10 +126,23 @@ class CuratePartitionTests(CurateTestBase):
         self.assertEqual(result.quarantined, 3)
         self.assertEqual(result.total, 4)
 
+    def test_duplicate_records_quarantined_with_duplicate_reasons(self) -> None:
+        settings = self.settings(threshold=1.0)
+        records = [
+            healthy_record(0),
+            {**healthy_record(1), "unique_key": "1000"},  # same key again
+        ]
+        self.fetch_records(settings, records)
+        result = run_curate(settings)
+        self.assertEqual(result.quarantined, 1)
+        self.assertEqual(result.counts, {"DUPLICATE_KEY": 1})
+        line = self.quarantine_lines(settings)[0]
+        self.assertEqual(line["reasons"], ["DUPLICATE_KEY"])
+
     def test_threshold_exceeded_fails_the_run_with_measured_numbers(self) -> None:
         settings = self.settings(threshold=0.05)
         records = [healthy_record(i) for i in range(19)] + [
-            {**healthy_record(99), "zip_code": "00000"}
+            {**healthy_record(99), "incident_zip": "00000"}
         ]  # 1/20 = 5% exactly -> NOT above threshold (strictly greater fails)
         self.fetch_records(settings, records)
         result = run_curate(settings)
@@ -170,7 +184,7 @@ class CurateGuardTests(CurateTestBase):
     def test_quarantine_output_is_byte_deterministic(self) -> None:
         records = [
             healthy_record(0),
-            {**healthy_record(1), "zip_code": "00000"},
+            {**healthy_record(1), "incident_zip": "00000"},
             {**healthy_record(2), "complaint_type": "Pothole"},
         ]
         settings_a = self.settings(threshold=1.0)
@@ -191,7 +205,7 @@ class CurateGuardTests(CurateTestBase):
     def test_no_temp_files_left_behind(self) -> None:
         settings = self.settings(threshold=1.0)
         self.fetch_records(
-            settings, [{**healthy_record(1), "zip_code": "00000"}]
+            settings, [{**healthy_record(1), "incident_zip": "00000"}]
         )
         run_curate(settings)
         self.assertEqual(list(Path(settings.curated_dir).glob("*.tmp")), [])

@@ -15,6 +15,7 @@ python -m unittest discover   # tests, offline
 data-factory                  # whole pipeline (resumable; stages append over time)
 data-factory fetch            # only the fetch stage
 data-factory curate           # contract gate: quarantine + per-reason counts + threshold
+data-factory clean            # cleaning + population join -> data/curated/cases.csv
 data-factory --show-config    # resolve and print the active configuration
 ```
 
@@ -24,6 +25,34 @@ continues where it stopped; re-running a completed fetch makes no HTTP requests.
 The curate stage never drops data silently: contract violations go to
 `data/curated/quarantine.jsonl` with reason codes, counts are printed every
 run, and a quarantine ratio above `quarantine.max_ratio` fails the run (exit 5).
+
+## Population reference source (required before `clean`)
+
+Choose a public ZIP → population table (NYC Open Data or Census; finding and
+validating it is part of the challenge), normalize its header to
+
+```csv
+zip,population,borough
+10001,25000,Manhattan
+```
+
+(`borough` optional — county names like `Kings` are normalized automatically),
+save it as `data/reference/zip_population.csv`, commit it (it is small
+reference data, not raw 311 dumps), and record its URL + fetch date in
+`config/default.json` under `population.source_url` / `population.fetched_date`
+for the report and manifest.
+
+## Source field map
+
+`source.field_map` in config binds canonical field names to the raw API field
+names (e.g. `zip_code → incident_zip`). Confirm them with one request before
+the first live run:
+
+```bash
+curl -sS 'https://data.cityofnewyork.us/resource/erm2-nwe9.json?$limit=1'
+```
+
+If a raw name differs, fix it in config — no code changes (AGENTS.md §1).
 
 ## Configuration
 

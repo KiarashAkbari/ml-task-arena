@@ -7,11 +7,22 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from data_factory.config import DEFAULT_CONFIG_PATH, load_config
+from data_factory.config import REQUIRED_FIELD_MAP_KEYS, DEFAULT_CONFIG_PATH, load_config
 from data_factory.errors import ConfigError
 
+FIELD_MAP = {
+    **{key: key for key in REQUIRED_FIELD_MAP_KEYS},
+    "zip_code": "incident_zip",
+}
+
 VALID_CONFIG = {
-    "source": {"url": "https://data.cityofnewyork.us/resource/erm2-nwe9.json"},
+    "source": {"url": "https://data.cityofnewyork.us/resource/erm2-nwe9.json",
+               "field_map": FIELD_MAP},
+    "population": {
+        "path": "data/reference/zip_population.csv",
+        "source_url": "",
+        "fetched_date": "",
+    },
     "scope": {"agency": "NYPD", "complaint_types": ["Noise - Residential"]},
     "date_range": {"start": "2023-01-01", "end": "2024-06-30"},
     "fetch": {
@@ -140,6 +151,61 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(
             settings.scope_complaint_types, ("Dirty Condition", "Missed Collection")
         )
+
+    def test_invalid_field_map_rejected(self) -> None:
+        base_source = json.loads(json.dumps(VALID_CONFIG["source"]))
+        cases: list[dict] = []
+        missing_section = {"url": base_source["url"]}  # no field_map key
+        cases.append(missing_section)
+        not_object = {**base_source, "field_map": ["unique_key"]}
+        cases.append(not_object)
+        empty_map = {**base_source, "field_map": {}}
+        cases.append(empty_map)
+        missing_key = {**base_source, "field_map": dict(FIELD_MAP)}
+        del missing_key["field_map"]["unique_key"]
+        cases.append(missing_key)
+        unknown_key = {**base_source, "field_map": {**FIELD_MAP, "zip": "incident_zip"}}
+        cases.append(unknown_key)
+        empty_value = {**base_source, "field_map": {**FIELD_MAP, "unique_key": "  "}}
+        cases.append(empty_value)
+        for replacement in cases:
+            config = json.loads(json.dumps(VALID_CONFIG))
+            config["source"] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(ConfigError):
+                load_config(self._write(config))
+
+    def test_invalid_population_section_rejected(self) -> None:
+        base_population = json.loads(json.dumps(VALID_CONFIG["population"]))
+        cases: list[dict] = [
+            {"path": "", "source_url": "", "fetched_date": ""},          # empty path
+            {"path": 42, "source_url": "", "fetched_date": ""},          # wrong type
+            {**base_population, "source_url": "ftp://example.test/p.csv"},  # wrong scheme
+            {**base_population, "source_url": 42},                       # wrong type
+            {**base_population, "fetched_date": "24/10/2026"},           # not ISO
+            {"path": "x.csv"},                                           # missing keys
+        ]
+        for replacement in cases:
+            config = json.loads(json.dumps(VALID_CONFIG))
+            config["population"] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(ConfigError):
+                load_config(self._write(config))
+
+    def test_population_metadata_from_file_when_filled(self) -> None:
+        config = json.loads(json.dumps(VALID_CONFIG))
+        config["population"] = {
+            "path": "data/reference/zip_population.csv",
+            "source_url": "https://example.org/zip-population.csv",
+            "fetched_date": "2026-10-24",
+        }
+        settings = load_config(self._write(config))
+        self.assertEqual(settings.population_source_url, "https://example.org/zip-population.csv")
+        self.assertEqual(settings.population_fetched_date.isoformat(), "2026-10-24")
+
+    def test_field_map_carried_into_settings(self) -> None:
+        settings = load_config(self._write(json.loads(json.dumps(VALID_CONFIG))))
+        self.assertEqual(settings.source_field_map["zip_code"], "incident_zip")
+        self.assertEqual(settings.source_field_map["unique_key"], "unique_key")
+        self.assertIsNone(settings.population_fetched_date)
 
     def test_values_come_from_file_not_hardcoded(self) -> None:
         config = json.loads(json.dumps(VALID_CONFIG))

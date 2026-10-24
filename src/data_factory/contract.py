@@ -35,21 +35,21 @@ COLUMNS: tuple[ColumnSpec, ...] = (
         type="string",
         nullable=False,
         domain="digits only; unique across the dataset",
-        raw_gate="MISSING_UNIQUE_KEY, INVALID_UNIQUE_KEY",
+        raw_gate="MISSING_UNIQUE_KEY, INVALID_UNIQUE_KEY, DUPLICATE_KEY",
     ),
     ColumnSpec(
         name="created_date",
         type="datetime",
         nullable=False,
         domain="ISO-8601 timestamp inside the configured window",
-        raw_gate="MISSING_CREATED_DATE, INVALID_CREATED_DATE",
+        raw_gate="MISSING_CREATED_DATE, INVALID_CREATED_DATE, DUPLICATE_CONTENT",
     ),
     ColumnSpec(
         name="closed_date",
         type="datetime",
         nullable=True,
-        domain="ISO-8601 timestamp; null when the case is still open",
-        raw_gate="INVALID_CLOSED_DATE",
+        domain="ISO-8601 timestamp; null when the case is still open; never before created_date",
+        raw_gate="INVALID_CLOSED_DATE, CLOSED_BEFORE_CREATED",
     ),
     ColumnSpec(
         name="agency",
@@ -64,6 +64,13 @@ COLUMNS: tuple[ColumnSpec, ...] = (
         nullable=False,
         domain="exactly one of the locked scope complaint types from config",
         raw_gate="MISSING_COMPLAINT_TYPE, OUT_OF_SCOPE_COMPLAINT_TYPE",
+    ),
+    ColumnSpec(
+        name="descriptor",
+        type="string",
+        nullable=True,
+        domain="source descriptor text; free-form, stripped",
+        raw_gate="",
     ),
     ColumnSpec(
         name="borough",
@@ -84,6 +91,21 @@ COLUMNS: tuple[ColumnSpec, ...] = (
         type="string",
         nullable=True,
         domain="Closed | In Progress | Open | Assigned | Pending | Unspecified",
+        raw_gate="",
+    ),
+    ColumnSpec(
+        name="population",
+        type="integer",
+        nullable=True,
+        domain="positive population of the record's ZIP from the reference source; "
+               "null when the ZIP is absent or unknown to the reference",
+        raw_gate="",
+    ),
+    ColumnSpec(
+        name="duration_minutes",
+        type="integer",
+        nullable=True,
+        domain=">= 0; null iff closed_date is null (negative would be quarantined)",
         raw_gate="",
     ),
 )

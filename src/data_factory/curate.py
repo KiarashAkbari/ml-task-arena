@@ -25,7 +25,7 @@ from pathlib import Path
 from data_factory.config import Settings
 from data_factory.errors import QuarantineThresholdExceeded, ValidationError
 from data_factory.fetch import BATCH_NAME_TEMPLATE, CHECKPOINT_NAME, _load_checkpoint
-from data_factory.validation import validate_record
+from data_factory.validation import RecordGate
 
 QUARANTINE_NAME = "quarantine.jsonl"
 
@@ -73,6 +73,7 @@ def run_curate(settings: Settings) -> CurateResult:
     counts: Counter[str] = Counter()
     total = 0
     passed = 0
+    gate = RecordGate(settings)  # contract + logical + duplicate rules, stream-ordered
     try:
         with tmp_path.open("w", encoding="utf-8") as tmp:
             for index in range(state["batches_written"]):
@@ -80,7 +81,7 @@ def run_curate(settings: Settings) -> CurateResult:
                 batch = json.loads(batch_path.read_text(encoding="utf-8"))
                 for record in batch:
                     total += 1
-                    reasons = sorted(set(validate_record(record, settings)))
+                    reasons = sorted(set(gate.check(record)))
                     if reasons:
                         for code in reasons:
                             counts[code] += 1

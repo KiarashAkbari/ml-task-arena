@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from data_factory import cli
+from data_factory.clean import CleanResult
 from data_factory.curate import CurateResult
 from data_factory.errors import EXIT_OK, EXIT_UNEXPECTED
 from data_factory.fetch import FetchResult
@@ -69,25 +70,30 @@ class CliStageTests(unittest.TestCase):
         base.update(overrides)
         return FetchResult(**base)  # type: ignore[arg-type]
 
-    def test_default_command_runs_fetch_then_curate(self) -> None:
+    def test_default_command_runs_fetch_then_curate_then_clean(self) -> None:
         with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
-                mock.patch("data_factory.cli.curate_stage.run_curate") as curate:
+                mock.patch("data_factory.cli.curate_stage.run_curate") as curate, \
+                mock.patch("data_factory.cli.clean_stage.run_clean") as clean:
             fetch.return_value = self._result()
             curate.return_value = _curate_result()
+            clean.return_value = _clean_result()
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.main([]), EXIT_OK)
         fetch.assert_called_once()
         curate.assert_called_once()
+        clean.assert_called_once()
 
     def test_fetch_subcommand_runs_fetch_stage_only(self) -> None:
         with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
-                mock.patch("data_factory.cli.curate_stage.run_curate") as curate:
+                mock.patch("data_factory.cli.curate_stage.run_curate") as curate, \
+                mock.patch("data_factory.cli.clean_stage.run_clean") as clean:
             fetch.return_value = self._result()
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 self.assertEqual(cli.main(["fetch"]), EXIT_OK)
         fetch.assert_called_once()
         curate.assert_not_called()
+        clean.assert_not_called()
         self.assertIn("10 records", stdout.getvalue())
 
     def test_fetch_summary_prints_real_measured_counts(self) -> None:
@@ -131,12 +137,14 @@ def _curate_result(**overrides: object) -> CurateResult:
 class CurateCliTests(unittest.TestCase):
     def test_curate_subcommand_runs_curate_stage_only(self) -> None:
         with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
-                mock.patch("data_factory.cli.curate_stage.run_curate") as curate:
+                mock.patch("data_factory.cli.curate_stage.run_curate") as curate, \
+                mock.patch("data_factory.cli.clean_stage.run_clean") as clean:
             curate.return_value = _curate_result()
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 self.assertEqual(cli.main(["curate"]), EXIT_OK)
         fetch.assert_not_called()
+        clean.assert_not_called()
         curate.assert_called_once()
         summary = stdout.getvalue()
         self.assertIn("scanned 100", summary)
@@ -157,6 +165,39 @@ class CurateCliTests(unittest.TestCase):
         self.assertEqual(code, 5)
         self.assertIn("quarantined 10 (10.00%; threshold 5.00%)", stdout.getvalue())
         self.assertIn("exceeds threshold", stderr.getvalue())
+
+
+def _clean_result(**overrides: object) -> CleanResult:
+    base: dict = {
+        "rows_scanned": 100,
+        "rows_written": 99,
+        "rows_skipped": 1,
+        "zip_matched": 90,
+        "zip_missing": 6,
+        "zip_unknown": 3,
+        "borough_mismatches": 2,
+        "duration_nulls": 4,
+    }
+    base.update(overrides)
+    return CleanResult(**base)  # type: ignore[arg-type]
+
+
+class CleanCliTests(unittest.TestCase):
+    def test_clean_subcommand_runs_clean_stage_only(self) -> None:
+        with mock.patch("data_factory.cli.fetch_stage.run_fetch") as fetch, \
+                mock.patch("data_factory.cli.curate_stage.run_curate") as curate, \
+                mock.patch("data_factory.cli.clean_stage.run_clean") as clean:
+            clean.return_value = _clean_result()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(cli.main(["clean"]), EXIT_OK)
+        fetch.assert_not_called()
+        curate.assert_not_called()
+        clean.assert_called_once()
+        summary = stdout.getvalue()
+        self.assertIn("wrote 99 rows", summary)
+        self.assertIn("borough mismatches 2", summary)
+        self.assertIn("quarantined 1", summary)
 
 
 if __name__ == "__main__":

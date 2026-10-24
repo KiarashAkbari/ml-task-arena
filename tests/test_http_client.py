@@ -141,7 +141,26 @@ class RetryPolicyTests(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
-                        "source": {"url": "https://data.cityofnewyork.us/resource/erm2-nwe9.json"},
+                        "source": {
+                            "url": "https://data.cityofnewyork.us/resource/erm2-nwe9.json",
+                            "field_map": {
+                                "unique_key": "unique_key",
+                                "created_date": "created_date",
+                                "closed_date": "closed_date",
+                                "agency": "agency",
+                                "complaint_type": "complaint_type",
+                                "borough": "borough",
+                                "zip_code": "incident_zip",
+                                "status": "status",
+                                "incident_address": "incident_address",
+                                "descriptor": "descriptor",
+                            },
+                        },
+                        "population": {
+                            "path": "data/reference/zip_population.csv",
+                            "source_url": "",
+                            "fetched_date": "",
+                        },
                         "scope": {"agency": "NYPD", "complaint_types": ["Noise - Park"]},
                         "date_range": {"start": "2023-01-01", "end": "2024-06-30"},
                         "fetch": {
