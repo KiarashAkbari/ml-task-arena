@@ -16,8 +16,8 @@
   },
   "population": {
     "path": "data/reference/zip_population.csv",
-    "source_url": "",
-    "fetched_date": ""
+    "source_url": "https://data.cityofnewyork.us/resource/pri4-ifjk.json?$limit=50000",
+    "fetched_date": "2026-10-24"
   },
   "scope": {
     "agency": "NYPD",
