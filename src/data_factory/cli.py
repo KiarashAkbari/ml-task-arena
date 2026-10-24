@@ -53,6 +53,8 @@ def _settings_as_json(settings: Settings) -> dict[str, Any]:
         "end_date": settings.end_date.isoformat(),
         "batch_size": settings.batch_size,
         "max_retries": settings.max_retries,
+        "retry_backoff_seconds": settings.retry_backoff_seconds,
+        "timeout_seconds": settings.timeout_seconds,
         "raw_dir": settings.raw_dir.as_posix(),
         "curated_dir": settings.curated_dir.as_posix(),
         "quarantine_max_ratio": settings.quarantine_max_ratio,

@@ -12,7 +12,12 @@ from data_factory.errors import ConfigError
 
 VALID_CONFIG = {
     "date_range": {"start": "2023-01-01", "end": "2024-06-30"},
-    "fetch": {"batch_size": 1000, "max_retries": 5},
+    "fetch": {
+        "batch_size": 1000,
+        "max_retries": 5,
+        "retry_backoff_seconds": 1.0,
+        "timeout_seconds": 30.0,
+    },
     "paths": {"raw_dir": "data/raw", "curated_dir": "data/curated"},
     "quarantine": {"max_ratio": 0.05},
 }
@@ -61,6 +66,11 @@ class LoadConfigTests(unittest.TestCase):
             ("batch_size", 0),           # below minimum
             ("batch_size", -5),
             ("max_retries", -1),
+            ("max_retries", "5"),
+            ("retry_backoff_seconds", -0.5),
+            ("retry_backoff_seconds", "1"),
+            ("timeout_seconds", 0),      # must be strictly positive
+            ("timeout_seconds", -1.0),
             ("start", "01/01/2023"),     # not ISO
             ("start", 20230101),         # not a string
             ("max_ratio", 1.5),          # outside [0, 1]

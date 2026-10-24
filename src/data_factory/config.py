@@ -1,7 +1,8 @@
 """Project configuration: loaded from JSON files outside the code.
 
 Every tunable named in AGENTS.md section 4.1 lives here — date range, batch
-size, paths, retry cap — plus the quarantine-ratio threshold (section 4.3).
+size, paths, retry cap — plus the quarantine-ratio threshold (section 4.3)
+and the HTTP retry/timeout behavior of the fetch layer (section 4.2).
 Loading failures raise :class:`ConfigError` so the CLI can exit with code 3.
 """
 
@@ -26,6 +27,8 @@ class Settings:
     end_date: date
     batch_size: int
     max_retries: int
+    retry_backoff_seconds: float
+    timeout_seconds: float
     raw_dir: Path
     curated_dir: Path
     quarantine_max_ratio: float
@@ -71,6 +74,17 @@ def _parse_int(value: Any, context: str, *, minimum: int | None = None) -> int:
     if minimum is not None and value < minimum:
         raise ConfigError(f"config: '{context}' must be >= {minimum}, got {value}")
     return value
+
+
+def _parse_float(value: Any, context: str, *, minimum: float, strict: bool = False) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"config: '{context}' must be a number, got {value!r}")
+    number = float(value)
+    invalid = number <= minimum if strict else number < minimum
+    if invalid:
+        operator = ">" if strict else ">="
+        raise ConfigError(f"config: '{context}' must be {operator} {minimum}, got {value}")
+    return number
 
 
 def _parse_ratio(value: Any, context: str) -> float:
@@ -128,9 +142,20 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Settings:
         )
 
     fetch = _section(data, "fetch")
-    _reject_unknown_keys(fetch, {"batch_size", "max_retries"}, "fetch")
+    _reject_unknown_keys(fetch, {"batch_size", "max_retries", "retry_backoff_seconds", "timeout_seconds"}, "fetch")
     batch_size = _parse_int(_require(fetch, "batch_size", "fetch"), "fetch.batch_size", minimum=1)
     max_retries = _parse_int(_require(fetch, "max_retries", "fetch"), "fetch.max_retries", minimum=0)
+    retry_backoff_seconds = _parse_float(
+        _require(fetch, "retry_backoff_seconds", "fetch"),
+        "fetch.retry_backoff_seconds",
+        minimum=0.0,
+    )
+    timeout_seconds = _parse_float(
+        _require(fetch, "timeout_seconds", "fetch"),
+        "fetch.timeout_seconds",
+        minimum=0.0,
+        strict=True,
+    )
 
     paths = _section(data, "paths")
     _reject_unknown_keys(paths, {"raw_dir", "curated_dir"}, "paths")
@@ -148,6 +173,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Settings:
         end_date=end_date,
         batch_size=batch_size,
         max_retries=max_retries,
+        retry_backoff_seconds=retry_backoff_seconds,
+        timeout_seconds=timeout_seconds,
         raw_dir=raw_dir,
         curated_dir=curated_dir,
         quarantine_max_ratio=quarantine_max_ratio,
