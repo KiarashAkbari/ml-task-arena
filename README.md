@@ -36,6 +36,19 @@ covered by `tests/test_eda.py`.
 The fetch stage pages the locked scope into `data/raw/` one batch at a time
 (`fetch_checkpoint.json` records progress), so Ctrl-C anywhere and re-running
 continues where it stopped; re-running a completed fetch makes no HTTP requests.
+
+**Source shape guard (AGENTS §4.8.2).** A page's key set is *not* a schema:
+Socrata omits a field when every value in that page is null (a live run met
+`vehicle_type` for the first time at page 36). So the guard has two layers:
+once per invocation the dataset's declared schema is read from
+`/api/views/<id>.json` — a mapped field that is no longer declared, or a
+declared type that differs from the one stored in the checkpoint, stops the
+run with exit 5; per page, a mapped field that turns into an object/array also
+stops it. Columns that merely *appear* mid-run are recorded in the checkpoint
+and reported (`source schema: column(s) first seen mid-run: …`), never treated
+as errors. If the metadata endpoint is unreachable the audit degrades to a
+recorded warning instead of breaking a resumable fetch, and
+`run_manifest.json` reports the outcome under `fetch.schema_audit`.
 The curate stage never drops data silently: contract violations go to
 `data/curated/quarantine.jsonl` with reason codes, counts are printed every
 run, and a quarantine ratio above `quarantine.max_ratio` fails the run (exit 5).

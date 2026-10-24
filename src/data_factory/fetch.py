@@ -19,14 +19,27 @@ Behavior contract:
   was chosen (``window_mode``). The moving-window feature (section 4.8.1) and
   the run manifest (section 4.5: "the window received") both read it from
   here, so the manifest can never claim a window the data does not have.
-* **Defined failures** — non-array payload / non-object rows / changed column
-  set -> :class:`ValidationError`; HTTP failures propagate as
-  :class:`NetworkError` with the checkpoint intact.
+* **Defined failures** — non-array payload / non-object rows / a mapped field
+  turning into a nested value -> :class:`ValidationError`; HTTP failures
+  propagate as :class:`NetworkError` with the checkpoint intact.
+* **Shape guard (section 4.8.2)** — two layers, because a page's key set is
+  NOT a reliable schema signal: Socrata omits a field entirely when every row
+  in that page has it null (a live run hit this at page 36: ``vehicle_type``
+  appeared for the first time). So:
 
-Assumption (flagged): Socrata emits every dataset column on every row
-(including nulls), so the column set of any batch must equal the first
-batch's. If a real run ever shows a spurious mismatch, the check should relax
-to detecting added columns only.
+  1. *Authoritative, once per invocation*: fetch the dataset metadata
+     (``/api/views/<id>.json``), require every mapped field to be declared,
+     and compare the declared column types with the ones stored in the
+     checkpoint. A removed column or a changed type fails the run loudly.
+     The observed schema is stored in the checkpoint and reported in the
+     manifest. When the metadata endpoint is unreachable — or the source is
+     not a Socrata resource — the audit degrades to a recorded warning
+     instead of breaking a resumable run.
+  2. *Cheap, per page*: a mapped field must hold a scalar (or be absent); a
+     dict/list means the field changed type and stops the run.
+
+  Columns that merely APPEAR mid-run are normal (sparse fields); they are
+  recorded in the checkpoint and reported, never treated as a failure.
 """
 
 from __future__ import annotations
@@ -34,10 +47,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from data_factory.config import Settings
 from data_factory.errors import ValidationError
@@ -46,6 +61,10 @@ from data_factory.scope import build_where
 ORDER_FIELD = "unique_key"
 CHECKPOINT_NAME = "fetch_checkpoint.json"
 BATCH_NAME_TEMPLATE = "batch_{index:06d}.json"
+
+# Socrata resource URLs look like https://host/resource/<dataset-id>.json;
+# the metadata (declared schema) lives at /api/views/<dataset-id>.json.
+_SOCRATA_RESOURCE = re.compile(r"/resource/([A-Za-z0-9]{4}-[A-Za-z0-9]{4})(?:\.json)?/?$")
 
 # How the window recorded in a checkpoint was chosen (section 4.8.1).
 WINDOW_MODE_CONFIGURED = "configured"          # date_range from the config file
@@ -76,6 +95,8 @@ class FetchResult:
     resumed_records: int  # records already present when this invocation started
     peak_in_memory_records: int
     already_complete: bool
+    schema_audit: str = ""            # "verified" / "unavailable: …" / "skipped: …"
+    new_columns: tuple[str, ...] = ()  # columns that first appeared mid-run
 
 
 def compute_fingerprint(settings: Settings) -> str:
@@ -187,6 +208,128 @@ def _verify_batch_files(raw_dir: Path, batches_written: int) -> None:
             )
 
 
+def metadata_url(source_url: str) -> str | None:
+    """Socrata metadata URL for a resource URL (``None`` when not Socrata)."""
+    parsed = urlparse(source_url)
+    match = _SOCRATA_RESOURCE.search(parsed.path)
+    if match is None:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/api/views/{match.group(1)}.json"
+
+
+def parse_source_schema(payload: Any) -> dict[str, str]:
+    """``{field name: declared type}`` from a Socrata view-metadata payload.
+
+    Uses ``fieldName`` (the API field, e.g. ``incident_zip``) over ``name``
+    (the display label, e.g. ``Incident Zip``) — the factory maps raw API
+    field names, not labels.
+
+    Raises:
+        ValueError: The payload is not a metadata document with columns.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(f"expected a metadata object, got {type(payload).__name__}")
+    columns = payload.get("columns")
+    if not isinstance(columns, list) or not columns:
+        raise ValueError("metadata document declares no columns")
+    schema: dict[str, str] = {}
+    for entry in columns:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("fieldName") or entry.get("name")
+        if isinstance(name, str) and name:
+            schema[name] = str(entry.get("dataTypeName") or "unknown")
+    if not schema:
+        raise ValueError("metadata document declares no named columns")
+    return schema
+
+
+def audit_source_shape(
+    settings: Settings,
+    client: Any,
+    *,
+    previous: dict[str, str] | None,
+) -> tuple[dict[str, str], str]:
+    """Verify the source's declared schema (AGENTS.md section 4.8.2).
+
+    Returns:
+        ``(schema, status)`` where status is ``"verified"``, or a
+        ``"skipped: …"`` / ``"unavailable: …"`` note when the audit could not
+        run. A degraded audit never breaks a resumable fetch: the data-level
+        guards still apply and the status is recorded for the manifest.
+
+    Raises:
+        ValidationError: The declared schema no longer contains a mapped
+            field, or a declared type changed compared with the checkpoint —
+            the two failures section 4.8.2 requires to stop the run.
+    """
+    url = metadata_url(settings.source_url)
+    if url is None:
+        return {}, "skipped: source URL is not a Socrata resource"
+    try:
+        payload = client.get(url)
+        schema = parse_source_schema(payload)
+    except Exception as exc:  # noqa: BLE001 - audit must not break the fetch
+        return {}, f"unavailable: {type(exc).__name__}: {exc}"[:200]
+
+    mapped = set(settings.source_field_map.values())
+    missing = sorted(mapped - set(schema))
+    if missing:
+        raise ValidationError(
+            "source schema audit: the dataset no longer declares mapped "
+            f"field(s) {missing} ({len(schema)} columns declared); the source "
+            "shape changed — fix source.field_map and the scope, or restore "
+            "the old source"
+        )
+
+    if previous:
+        removed = sorted(set(previous) - set(schema))
+        retyped = sorted(
+            name for name in set(previous) & set(schema)
+            if previous[name] != schema[name]
+        )
+        if removed or retyped:
+            details = []
+            if removed:
+                details.append(f"removed={removed}")
+            if retyped:
+                details.append(
+                    "type changed="
+                    + str([f"{n}: {previous[n]} -> {schema[n]}" for n in retyped])
+                )
+            raise ValidationError(
+                "source schema audit: the dataset changed shape since this "
+                f"window was fetched ({'; '.join(details)}); remove the raw "
+                "directory to refetch, or restore the previous source"
+            )
+    return schema, "verified"
+
+
+def _check_field_types(
+    rows: list[dict[str, Any]], offset: int, mapped_fields: set[str]
+) -> None:
+    """Fail when a mapped field holds a nested value (a real type change).
+
+    Absent and null values are fine: a page where every record has, say, no
+    ``vehicle_type`` legitimately omits the field. Only the JSON shape of a
+    present value is a signal.
+    """
+    for row in rows:
+        for field in mapped_fields:
+            if field not in row:
+                continue
+            value = row[field]
+            if value is None or isinstance(value, str):
+                continue
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                continue  # numbers instead of strings stay readable by the gate
+            raise ValidationError(
+                "source type changed during fetch "
+                f"(offset {offset}): field '{field}' holds a "
+                f"{type(value).__name__}, expected a scalar"
+            )
+
+
 def _validate_payload(payload: Any, offset: int) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         raise ValidationError(
@@ -256,6 +399,7 @@ def run_fetch(
                 resumed_records=state["records_written"],
                 peak_in_memory_records=state["peak_in_memory_records"],
                 already_complete=True,
+                schema_audit=str(state.get("schema_audit", "")),
             )
         resumed_records = state["records_written"]
     else:
@@ -283,7 +427,18 @@ def run_fetch(
     initial_batches = state["batches_written"]
     prior_http_requests = state["http_requests"]
     peak_records = 0
-    baseline_columns: set[str] | None = set(state["columns"]) or None
+    new_columns: list[str] = []
+
+    # Shape guard layer 1 (section 4.8.2): the dataset's declared schema.
+    # Runs only when there is work to do — a completed checkpoint stays a
+    # zero-request no-op (section 4.2 idempotency).
+    schema, audit_status = audit_source_shape(
+        settings, client, previous=dict(state.get("source_schema") or {}) or None
+    )
+    if schema:
+        state["source_schema"] = schema
+    state["schema_audit"] = audit_status
+    _save_checkpoint(checkpoint_path, state)
 
     while True:
         offset = state["next_offset"]
@@ -306,7 +461,20 @@ def run_fetch(
             )
             _save_checkpoint(checkpoint_path, state)
             raise
-        rows = _validate_payload(payload, offset)
+        try:
+            rows = _validate_payload(payload, offset)
+            if rows:
+                _check_field_types(
+                    rows, offset, set(settings.source_field_map.values())
+                )
+        except ValidationError:
+            # The request succeeded, so count it before failing the run.
+            state["http_requests"] = prior_http_requests + client.request_count
+            state["peak_in_memory_records"] = max(
+                state["peak_in_memory_records"], peak_records
+            )
+            _save_checkpoint(checkpoint_path, state)
+            raise
         if not rows:
             state["complete"] = True
             state["http_requests"] = prior_http_requests + client.request_count
@@ -318,17 +486,17 @@ def run_fetch(
 
         peak_records = max(peak_records, len(rows))
 
-        columns = sorted({key for row in rows for key in row})
-        if baseline_columns is None:
-            baseline_columns = set(columns)
-            state["columns"] = columns
-        elif set(columns) != baseline_columns:
-            missing = sorted(baseline_columns - set(columns))
-            added = sorted(set(columns) - baseline_columns)
-            raise ValidationError(
-                "source shape changed during fetch "
-                f"(offset {offset}): missing={missing}, added={added}"
-            )
+        # Columns that appear mid-run are sparse fields (Socrata omits a
+        # field when every value in that page is null), not a shape change:
+        # record them, report them, never fail on them.
+        observed = {key for row in rows for key in row}
+        if state["columns"]:  # baseline already established by an earlier page
+            added = sorted(observed - set(state["columns"]))
+            if added:
+                new_columns.extend(added)
+            state["columns"] = sorted(set(state["columns"]) | observed)
+        else:
+            state["columns"] = sorted(observed)
 
         batch_path = raw_dir / BATCH_NAME_TEMPLATE.format(index=state["batches_written"])
         _atomic_write_text(batch_path, _dump_batch(rows))
@@ -353,4 +521,6 @@ def run_fetch(
         resumed_records=resumed_records,
         peak_in_memory_records=peak_records,
         already_complete=False,
+        schema_audit=audit_status,
+        new_columns=tuple(sorted(set(new_columns))),
     )

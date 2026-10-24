@@ -160,6 +160,9 @@ def collect_manifest(
             "batches": state["batches_written"],
             "http_requests": state["http_requests"],
             "peak_in_memory_records": state["peak_in_memory_records"],
+            # Section 4.8.2 evidence: how the source shape was verified.
+            "schema_audit": state.get("schema_audit", "not recorded"),
+            "source_columns": len(state.get("columns") or []),
         },
         "passed_records": passed,
         "quarantine": {

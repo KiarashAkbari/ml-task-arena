@@ -34,16 +34,53 @@ def healthy_record(index: int) -> dict:
     }
 
 
-class ScriptedClient:
-    """Serves a fixed list of records in pages (offline)."""
+# The fields the fake source *declares*, independent of which values a given
+# page carries: a real dataset declares all its columns, while individual
+# pages omit the ones that are null everywhere (the sparse-column behaviour
+# that broke the first shape guard live).
+FAKE_SOURCE_FIELDS: tuple[str, ...] = (
+    "unique_key",
+    "created_date",
+    "closed_date",
+    "agency",
+    "complaint_type",
+    "descriptor",
+    "borough",
+    "incident_zip",
+    "status",
+    "incident_address",
+)
 
-    def __init__(self, records: list[dict]) -> None:
+
+class ScriptedClient:
+    """Serves a fixed list of records in pages, plus dataset metadata (offline)."""
+
+    def __init__(
+        self,
+        records: list[dict],
+        *,
+        schema: dict[str, str] | None = None,
+        fail_metadata: Exception | None = None,
+    ) -> None:
         self.records = records
         self.request_count = 0
+        self.schema = schema or {name: "text" for name in FAKE_SOURCE_FIELDS}
+        self.fail_metadata = fail_metadata
+
+    def metadata(self) -> dict:
+        return {
+            "columns": [
+                {"fieldName": name, "name": name, "dataTypeName": dtype}
+                for name, dtype in sorted(self.schema.items())
+            ]
+        }
 
     def get(self, url: str, *, params: dict | None = None):  # noqa: ANN001
-        assert params is not None
         self.request_count += 1
+        if params is None:  # metadata request (schema audit)
+            if self.fail_metadata is not None:
+                raise self.fail_metadata
+            return self.metadata()
         offset = int(params["$offset"])
         limit = int(params["$limit"])
         return self.records[offset : offset + limit]

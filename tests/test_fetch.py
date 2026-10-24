@@ -10,12 +10,15 @@ from pathlib import Path
 
 from data_factory.config import Settings, load_config
 from data_factory.errors import NetworkError, ValidationError
+from tests.test_curate import FAKE_SOURCE_FIELDS
+
 from data_factory.fetch import (
     BATCH_NAME_TEMPLATE,
     CHECKPOINT_NAME,
     WINDOW_MODE_SINCE_LAST_RUN,
     FetchResult,
     compute_fingerprint,
+    metadata_url,
     run_fetch,
 )
 
@@ -38,18 +41,30 @@ class FakeFetchClient:
         *,
         fail_at_offset: int | None = None,
         columns_per_batch: list[set[str]] | None = None,
+        schema: dict[str, str] | None = None,
+        fail_metadata: Exception | None = None,
     ) -> None:
         self.total = total
         self.fail_at_offset = fail_at_offset
         self.columns_per_batch = columns_per_batch
+        self.schema = schema or {name: "text" for name in FAKE_SOURCE_FIELDS}
+        self.fail_metadata = fail_metadata
         self.request_count = 0
         self.offsets: list[int] = []
 
     def get(self, url: str, *, params: dict | None = None):  # noqa: ANN001
-        assert params is not None
+        self.request_count += 1
+        if params is None:  # metadata request (schema audit)
+            if self.fail_metadata is not None:
+                raise self.fail_metadata
+            return {
+                "columns": [
+                    {"fieldName": name, "dataTypeName": dtype}
+                    for name, dtype in sorted(self.schema.items())
+                ]
+            }
         offset = int(params["$offset"])
         self.offsets.append(offset)
-        self.request_count += 1
         if self.fail_at_offset is not None and offset >= self.fail_at_offset:
             raise NetworkError("simulated outage")
         batch_index = offset // int(params["$limit"])
@@ -90,7 +105,8 @@ class FreshFetchTests(FetchTestBase):
         result = run_fetch(settings, FakeFetchClient(25))
         self.assertEqual(result.records, 25)
         self.assertEqual(result.batches, 3)  # 10 + 10 + 5
-        self.assertEqual(result.http_requests, 3)
+        # 3 data pages + 1 schema-audit request (section 4.8.2)
+        self.assertEqual(result.http_requests, 4)
         self.assertEqual(result.resumed_records, 0)
         self.assertFalse(result.already_complete)
 
@@ -108,7 +124,8 @@ class FreshFetchTests(FetchTestBase):
         result = run_fetch(settings, FakeFetchClient(20))
         self.assertEqual(result.records, 20)
         self.assertEqual(result.batches, 2)
-        self.assertEqual(result.http_requests, 3)  # final probe returns []
+        # 2 data pages + the probe + the schema audit
+        self.assertEqual(result.http_requests, 4)
         self.assertFalse(
             (settings.raw_dir / BATCH_NAME_TEMPLATE.format(index=2)).exists(),
             "empty pages must not create empty batch files",
@@ -227,26 +244,145 @@ class GuardTests(FetchTestBase):
         with self.assertRaises(ValidationError):
             run_fetch(settings, FakeFetchClient(25))
 
-    def test_changed_column_set_detected_mid_run(self) -> None:
-        """AGENTS 4.8.2: source shape changes stop the run loudly."""
+    def test_sparse_column_appearing_mid_run_is_recorded_not_fatal(self) -> None:
+        """Regression: a live run died at page 36 when ``vehicle_type`` appeared.
+
+        Socrata omits a field when every value in the page is null, so a new
+        key mid-run is normal sparsity, not a shape change (AGENTS 4.8.2).
+        """
         settings = self.settings(batch_size=2)
         client = FakeFetchClient(
             4,
-            columns_per_batch=[{"unique_key", "a"}, {"unique_key", "a", "new_col"}],
+            columns_per_batch=[{"unique_key", "a"}, {"unique_key", "a", "vehicle_type"}],
         )
-        with self.assertRaises(ValidationError) as ctx:
-            run_fetch(settings, client)
-        self.assertIn("source shape changed", str(ctx.exception))
+        result = run_fetch(settings, client)
+        self.assertEqual(result.records, 4)
+        self.assertEqual(result.new_columns, ("vehicle_type",))
+        state = json.loads(
+            (settings.raw_dir / CHECKPOINT_NAME).read_text(encoding="utf-8")
+        )
+        self.assertIn("vehicle_type", state["columns"])
 
-    def test_missing_column_detected_mid_run(self) -> None:
+    def test_column_disappearing_from_a_page_is_not_fatal(self) -> None:
+        """The mirror case: a sparse field absent from a later page is fine."""
         settings = self.settings(batch_size=2)
         client = FakeFetchClient(
             4,
             columns_per_batch=[{"unique_key", "a", "b"}, {"unique_key", "a"}],
         )
+        result = run_fetch(settings, client)
+        self.assertEqual(result.records, 4)
+
+    def test_field_turning_into_an_object_is_fatal(self) -> None:
+        """A real type change at the value level stops the run loudly."""
+        settings = self.settings(batch_size=2)
+
+        class ObjectClient(FakeFetchClient):
+            def get(self, url, *, params=None):  # noqa: ANN001
+                if params is None:
+                    return super().get(url, params=params)
+                rows = super().get(url, params=params)
+                if rows:
+                    rows[0] = {**rows[0], "created_date": {"$date": "2023-01-01"}}
+                return rows
+
         with self.assertRaises(ValidationError) as ctx:
-            run_fetch(settings, client)
-        self.assertIn("missing=['b']", str(ctx.exception))
+            run_fetch(settings, ObjectClient(4),)
+        self.assertIn("source type changed", str(ctx.exception))
+        self.assertIn("created_date", str(ctx.exception))
+
+
+class SchemaAuditTests(FetchTestBase):
+    """Layer 1 of the 4.8.2 guard: the dataset's declared schema."""
+
+    def test_metadata_url_is_derived_from_a_socrata_resource_url(self) -> None:
+        self.assertEqual(
+            metadata_url("https://data.cityofnewyork.us/resource/erm2-nwe9.json"),
+            "https://data.cityofnewyork.us/api/views/erm2-nwe9.json",
+        )
+        self.assertIsNone(metadata_url("https://example.test/v1/records.json"))
+
+    def test_audit_records_the_declared_schema_in_the_checkpoint(self) -> None:
+        settings = self.settings()
+        result = run_fetch(settings, FakeFetchClient(5))
+        self.assertEqual(result.schema_audit, "verified")
+        state = json.loads(
+            (settings.raw_dir / CHECKPOINT_NAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["schema_audit"], "verified")
+        self.assertIn("incident_zip", state["source_schema"])
+
+    def test_removed_mapped_field_fails_the_audit(self) -> None:
+        settings = self.settings()
+        schema = {name: "text" for name in FAKE_SOURCE_FIELDS if name != "incident_zip"}
+        with self.assertRaises(ValidationError) as ctx:
+            run_fetch(settings, FakeFetchClient(5, schema=schema))
+        message = str(ctx.exception)
+        self.assertIn("no longer declares mapped field", message)
+        self.assertIn("incident_zip", message)
+
+    def test_declared_type_change_between_invocations_fails_the_audit(self) -> None:
+        settings = self.settings(batch_size=10)
+        with self.assertRaises(NetworkError):  # interrupt so the checkpoint stays open
+            run_fetch(settings, FakeFetchClient(25, fail_at_offset=20))
+
+        changed = {name: "text" for name in FAKE_SOURCE_FIELDS}
+        changed["created_date"] = "number"
+        with self.assertRaises(ValidationError) as ctx:
+            run_fetch(settings, FakeFetchClient(25, schema=changed))
+        message = str(ctx.exception)
+        self.assertIn("changed shape", message)
+        self.assertIn("created_date: text -> number", message)
+
+    def test_removed_column_between_invocations_fails_the_audit(self) -> None:
+        """An unmapped column disappearing is still a shape change (4.8.2)."""
+        settings = self.settings(batch_size=10)
+        wide = {name: "text" for name in FAKE_SOURCE_FIELDS}
+        wide["vehicle_type"] = "text"
+        with self.assertRaises(NetworkError):
+            run_fetch(settings, FakeFetchClient(25, fail_at_offset=20, schema=wide))
+
+        shrunk = {name: "text" for name in FAKE_SOURCE_FIELDS}
+        with self.assertRaises(ValidationError) as ctx:
+            run_fetch(settings, FakeFetchClient(25, schema=shrunk))
+        message = str(ctx.exception)
+        self.assertIn("changed shape", message)
+        self.assertIn("removed=['vehicle_type']", message)
+
+    def test_removing_a_mapped_field_is_caught_even_on_the_first_page(self) -> None:
+        settings = self.settings()
+        shrunk = {name: "text" for name in FAKE_SOURCE_FIELDS if name != "descriptor"}
+        with self.assertRaises(ValidationError) as ctx:
+            run_fetch(settings, FakeFetchClient(5, schema=shrunk))
+        self.assertIn("no longer declares mapped field(s) ['descriptor']", str(ctx.exception))
+
+    def test_unreachable_metadata_degrades_instead_of_breaking_the_fetch(self) -> None:
+        settings = self.settings()
+        client = FakeFetchClient(5, fail_metadata=NetworkError("metadata down"))
+        result = run_fetch(settings, client)
+        self.assertEqual(result.records, 5)
+        self.assertTrue(result.schema_audit.startswith("unavailable:"))
+        state = json.loads(
+            (settings.raw_dir / CHECKPOINT_NAME).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["schema_audit"], result.schema_audit)
+        self.assertNotIn("source_schema", state)
+
+    def test_non_socrata_source_skips_the_audit(self) -> None:
+        settings = dataclasses.replace(
+            self.settings(), source_url="https://example.test/v1/records"
+        )
+        result = run_fetch(settings, FakeFetchClient(5))
+        self.assertEqual(result.schema_audit, "skipped: source URL is not a Socrata resource")
+
+    def test_completed_checkpoint_stays_a_zero_request_noop(self) -> None:
+        """The audit must not cost a request when there is nothing to fetch."""
+        settings = self.settings()
+        run_fetch(settings, FakeFetchClient(5))
+        client = FakeFetchClient(5)
+        result = run_fetch(settings, client)
+        self.assertTrue(result.already_complete)
+        self.assertEqual(client.request_count, 0)
 
     def test_non_array_payload_rejected(self) -> None:
         settings = self.settings()

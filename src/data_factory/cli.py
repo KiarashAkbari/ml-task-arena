@@ -79,6 +79,13 @@ def _run_fetch(settings: Settings, *, window_mode: str) -> None:
     """Execute the fetch stage and print its measured summary."""
     client = HttpClient(RetryPolicy.from_settings(settings))
     result = fetch_stage.run_fetch(settings, client, window_mode=window_mode)
+    if result.schema_audit:
+        print(f"source schema: {result.schema_audit}")
+    if result.new_columns:
+        print(
+            "source schema: column(s) first seen mid-run (sparse, not a shape "
+            f"change): {', '.join(result.new_columns)}"
+        )
     if result.already_complete:
         print(
             f"fetch: already complete — {result.records:,} records in "
