@@ -60,14 +60,39 @@ def _fetch(client: HttpClient, params: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def fetch_count(client: HttpClient, where: str) -> int:
-    """Return record count for a $where clause via a single count query."""
+    """Return record count for a $where clause via a single count query.
+
+    Socrata names the ``count(1)`` column variably (observed live: ``count_1``,
+    also ``count``), so the single returned value is parsed positionally.
+    """
     rows = _fetch(client, {"$select": "count(1)", "$where": where})
     if len(rows) != 1:
         raise ValidationError(f"count query returned {len(rows)} row(s): {rows!r}")
+    row = rows[0]
+    if len(row) != 1:
+        raise ValidationError(
+            f"count query returned unexpected columns {sorted(row)}: {row!r}"
+        )
+    value = next(iter(row.values()))
     try:
-        return int(rows[0]["count"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValidationError(f"count query returned unreadable payload: {rows!r}") from exc
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"count query returned unreadable payload: {row!r}") from exc
+
+
+def _row_count(row: dict[str, Any], group_field: str) -> int:
+    """Parse the count out of a grouped row: ``{group_field, count_*}``."""
+    if group_field not in row:
+        raise ValidationError(f"group query row is missing '{group_field}': {row!r}")
+    count_keys = [key for key in row if key != group_field]
+    if len(count_keys) != 1:
+        raise ValidationError(
+            f"group query row has unexpected columns {sorted(row)}: {row!r}"
+        )
+    try:
+        return int(row[count_keys[0]])
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"group query row is unreadable: {row!r}") from exc
 
 
 def fetch_group(
@@ -112,14 +137,14 @@ def main(argv: list[str] | None = None) -> int:
 
             statuses = fetch_group(client, group_field="status", where=where)
             for row in statuses:
-                count = int(row["count"])
+                count = _row_count(row, "status")
                 share = 100 * count / total if total else 0.0
                 print(f"  status {row['status']!r}: {count:,} ({share:.1f}%)")
 
             types = fetch_group(client, group_field="complaint_type", where=where)
             print(f"  top complaint types (of {len(types)}):")
             for row in types[:TOP_TYPES_LIMIT]:
-                print(f"    {int(row['count']):>10,}  {row['complaint_type']}")
+                print(f"  {_row_count(row, 'complaint_type'):>10,}  {row['complaint_type']}")
 
         print(f"\nHTTP requests made: {client.request_count}")
         return 0
