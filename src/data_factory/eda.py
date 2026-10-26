@@ -31,7 +31,7 @@ import pandas as pd
 
 from data_factory.clean import CURATED_COLUMNS
 from data_factory.errors import ValidationError
-from data_factory.population import PopulationRow
+from data_factory.population import PopulationRow, normalize_borough
 
 DATE_COLUMNS: tuple[str, ...] = ("created_date", "closed_date")
 INTEGER_COLUMNS: tuple[str, ...] = ("population", "duration_minutes")
@@ -208,6 +208,18 @@ def monthly_volume(frame: pd.DataFrame) -> pd.DataFrame:
     return table.astype("int64")
 
 
+def _district_labels(frame: pd.DataFrame) -> pd.Series:
+    """District labels with 311 spellings mapped to the canonical ones.
+
+    ``clean`` already canonicalises the column, so this is normally a no-op;
+    it keeps the analysis correct for a dataset curated before that fix and
+    can never change a label it does not recognise.
+    """
+    return frame["borough"].map(
+        lambda value: normalize_borough(value) if isinstance(value, str) else value
+    )
+
+
 def borough_totals(population: dict[str, PopulationRow]) -> pd.Series:
     """Reference population per district (borough), summed over ZIPs."""
     totals: dict[str, int] = {}
@@ -223,7 +235,7 @@ def borough_rates(frame: pd.DataFrame, population: dict[str, PopulationRow]) -> 
     Districts without a reference population keep a null rate — the same rule
     the aggregate table follows, so the analysis never invents a denominator.
     """
-    cases = frame["borough"].value_counts()
+    cases = _district_labels(frame).value_counts()
     totals = borough_totals(population)
     table = pd.DataFrame({"cases": cases})
     table["population"] = totals.reindex(table.index)
@@ -233,7 +245,8 @@ def borough_rates(frame: pd.DataFrame, population: dict[str, PopulationRow]) -> 
 
 def borough_type_rates(frame: pd.DataFrame, population: dict[str, PopulationRow]) -> pd.DataFrame:
     """Cases and rate per 100,000 for every (district, complaint type) pair."""
-    grouped = frame.groupby(["borough", "complaint_type"], observed=True)
+    labelled = frame.assign(borough=_district_labels(frame))
+    grouped = labelled.groupby(["borough", "complaint_type"], observed=True)
     table = pd.DataFrame({"cases": grouped.size()})
     totals = borough_totals(population)
     table["population"] = table.index.get_level_values(0).map(totals).astype("Int64")

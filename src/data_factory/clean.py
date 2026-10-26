@@ -124,6 +124,13 @@ def _clean_row(
     ):
         mismatch = 1
 
+    # The district label is canonicalised here, once, so that every consumer
+    # agrees: 311 publishes BROOKLYN, the reference publishes Brooklyn, and
+    # both the aggregate table and the EDA join on the district name. Without
+    # this the join matched nothing and every rate cell came out blank —
+    # found by a real run, not by the tests (their fixtures were title-case).
+    district = normalize_borough(borough) or ""
+
     row_values = [
         text("unique_key"),
         created_raw,
@@ -131,7 +138,7 @@ def _clean_row(
         text("agency"),
         text("complaint_type"),
         optional_text("descriptor") or "",
-        borough,
+        district,
         zip_code,
         text("status"),
         str(population_value) if population_value != "" else "",

@@ -96,6 +96,45 @@ class CleanOutputTests(CleanTestBase):
         self.assertEqual(by_key["1002"]["population"], "")
         self.assertEqual(by_key["1003"]["population"], "")
 
+    def test_district_label_is_canonicalised_from_the_311_spelling(self) -> None:
+        """311 publishes BROOKLYN; the reference publishes Brooklyn.
+
+        Regression: the district join matched nothing on real data, so every
+        rate cell in the aggregate and the EDA came out blank.
+        """
+        settings = self.settings()
+        records = [
+            {**healthy_record(0), "borough": "BROOKLYN", "incident_zip": "11201"},
+            {**healthy_record(1), "borough": "BROOKLYN", "incident_zip": "11101"},
+            {**healthy_record(2), "borough": "MANHATTAN", "incident_zip": "10001"},
+            {**healthy_record(3), "borough": "Unspecified", "incident_zip": "11101"},
+            {**healthy_record(4), "borough": None, "incident_zip": "11101"},
+        ]
+        self.pipeline(records, settings)
+        run_clean(settings)
+        _, rows = self.read_cases(settings)
+        by_key = {row["unique_key"]: row for row in rows}
+
+        self.assertEqual(by_key["1000"]["borough"], "Brooklyn")
+        self.assertEqual(by_key["1001"]["borough"], "Brooklyn")
+        self.assertEqual(by_key["1002"]["borough"], "Manhattan")
+        self.assertEqual(by_key["1003"]["borough"], "Unspecified", "never invented")
+        self.assertEqual(by_key["1004"]["borough"], "", "absent stays null")
+
+    def test_canonical_district_still_flags_a_real_mismatch(self) -> None:
+        """Normalising the label must not hide the cross-check (AGENTS 3)."""
+        settings = self.settings()
+        records = [
+            # ZIP belongs to Queens in the reference, 311 says Brooklyn
+            {**healthy_record(0), "borough": "BROOKLYN", "incident_zip": "11101"},
+            {**healthy_record(1), "borough": "BRONX", "incident_zip": "11101"},
+        ]
+        self.pipeline(records, settings)
+        result = run_clean(settings)
+        self.assertEqual(result.borough_mismatches, 2)
+        _, rows = self.read_cases(settings)
+        self.assertEqual(rows[0]["borough"], "Brooklyn", "the 311 claim is kept")
+
     def test_join_never_changes_row_count(self) -> None:
         """4.4: rows before/after the join must be explainable — here: equal."""
         settings = self.settings()

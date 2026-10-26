@@ -217,6 +217,35 @@ class RateTests(EdaTestBase):
                 )
 
 
+class LegacyLabelTests(EdaTestBase):
+    """Analysis stays correct for a dataset curated before the label fix."""
+
+    def test_uppercase_311_boroughs_still_get_a_rate(self) -> None:
+        frame = self.frame.copy()
+        frame["borough"] = frame["borough"].str.upper()
+        self.assertEqual(set(frame["borough"]), {"QUEENS"})
+
+        table = borough_rates(frame, load_population(self.population_path))
+        row = table.loc["Queens"]
+        self.assertEqual(row["cases"], len(frame))
+        self.assertEqual(row["population"], 50_000)
+        self.assertAlmostEqual(float(row["rate_per_100k"]), len(frame) / 50_000 * 100_000)
+
+    def test_uppercase_boroughs_group_into_one_district(self) -> None:
+        frame = self.frame.copy()
+        frame["borough"] = frame["borough"].str.upper()
+        table = borough_type_rates(frame, load_population(self.population_path))
+        self.assertEqual(sorted({district for district, _ in table.index}), ["Queens"])
+
+    def test_unknown_label_is_left_alone(self) -> None:
+        table = borough_rates(
+            pd.DataFrame({"borough": ["Atlantis"], "complaint_type": ["Noise - Park"]}),
+            load_population(self.population_path),
+        )
+        self.assertIn("Atlantis", table.index)
+        self.assertTrue(pd.isna(table.loc["Atlantis", "rate_per_100k"]))
+
+
 class RelationshipTests(EdaTestBase):
     def test_correlation_matrix_shape(self) -> None:
         table = numeric_relationships(self.frame)
