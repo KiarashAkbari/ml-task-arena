@@ -18,6 +18,12 @@ The result mirrors the section 6 template::
     ├── data/{raw,curated,reference}
     └── .gitignore
 
+``data/raw`` stays empty on purpose (the Delivery Guide keeps raw dumps out of
+the delivered tree); ``data/curated`` is filled with the four outputs plus the
+manifest when they exist, so the folder can be reviewed without re-running the
+factory or having network access. The evaluator can still delete them and run
+the factory from an empty folder, which is the section 4.10 acceptance check.
+
 It refuses to run when a required answer file is missing, and it warns when
 the notebook has no saved outputs — section 5.3 does not accept a notebook
 whose cells were never executed.
@@ -49,6 +55,33 @@ def _notebook_is_executed(path: Path) -> bool:
     return bool(code_cells) and all(
         cell.get("execution_count") is not None for cell in code_cells
     )
+
+
+#: The curated outputs a reviewable delivery should carry (AGENTS.md 4.5, 4.8.4).
+CURATED_OUTPUTS = (
+    "cases.csv",
+    "aggregate.csv",
+    "data_quality.csv",
+    "quarantine.jsonl",
+    "run_manifest.json",
+)
+
+
+def _copy_curated(target: Path) -> list[str]:
+    """Copy the curated outputs into the delivery; returns what was copied.
+
+    Missing outputs are not an error — the factory regenerates them — but they
+    are reported, because a delivery without them cannot be inspected without
+    running the pipeline first.
+    """
+    source = PROJECT_ROOT / "data" / "curated"
+    copied: list[str] = []
+    for name in CURATED_OUTPUTS:
+        path = source / name
+        if path.is_file():
+            shutil.copy2(path, target / "data" / "curated" / name)
+            copied.append(name)
+    return copied
 
 
 def build(target: Path, *, force: bool) -> int:
@@ -83,6 +116,15 @@ def build(target: Path, *, force: bool) -> int:
 
     for relative in ("data/raw", "data/curated"):
         (target / relative).mkdir(parents=True, exist_ok=True)
+    curated = _copy_curated(target)
+    missing_curated = [name for name in CURATED_OUTPUTS if name not in curated]
+    if missing_curated:
+        print(
+            f"warning: {len(missing_curated)} of {len(CURATED_OUTPUTS)} curated "
+            f"output(s) not found and not copied: {missing_curated} — run "
+            "'data-factory run' first if the delivery should carry them",
+            file=sys.stderr,
+        )
     reference = PROJECT_ROOT / "data" / "reference"
     if reference.is_dir():
         shutil.copytree(reference, target / "data" / "reference", ignore=IGNORED)
