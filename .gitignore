@@ -1,7 +1,10 @@
 # Raw and generated data must never enter git history (Delivery Guide §4.7).
 # The pipeline creates these directories at runtime from an empty folder.
 data/raw/
-data/curated/
+data/curated/*
+# The curated dataset is committed compressed: 105.9 MiB raw exceeds
+# GitHub's 100 MiB per-file limit. `gunzip -k` restores it byte-for-byte.
+!data/curated/cases.csv.gz
 data/raw_archived/
 
 # Generated delivery folder (AGENTS.md section 6). Built from this tree by
