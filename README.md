@@ -237,3 +237,5 @@ builder warns when the notebook still has no saved outputs.
 
 Exact dependency pins live in `requirements.txt` (kept in sync with `pyproject.toml`).
 Data directories (`data/raw/`, `data/curated/`, `data/raw_archived/`) are created by the pipeline itself and are never committed.
+
+`data/curated/cases.csv` is committed as `cases.csv.gz` (105.9 MiB raw, above GitHub's 100 MiB per-file limit). Restore it with `gunzip -k data/curated/cases.csv.gz`; `data-factory run` regenerates it from scratch if you prefer.
