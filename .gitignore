@@ -6,10 +6,14 @@ data/curated/*
 # GitHub's 100 MiB per-file limit. `gunzip -k` restores it byte-for-byte.
 !data/curated/cases.csv.gz
 data/raw_archived/
+# Stage 2: the Olist CSVs (126 MB) and the generated load reports
+data/raw/olist/
+data/db/
 
 # Generated delivery folder (AGENTS.md section 6). Built from this tree by
 # scripts/build_delivery.py; the source files are the only copy in git.
 stage-1-kiarash-akbari/
+stage-2-kiarash-akbari/
 
 # Virtual environments
 .venv/
