@@ -4,8 +4,9 @@ The project has exactly one source tree (``src/``, ``tests/``, the notebook,
 the report…); the delivery folder is *generated* from it so the two can never
 drift. Run::
 
-    python scripts/build_delivery.py            # -> stage-1-kiarash-akbari/
-    python scripts/build_delivery.py --force    # replace an existing folder
+    python scripts/build_delivery.py                  # -> stage-1-kiarash-akbari/
+    python scripts/build_delivery.py --force          # replace an existing folder
+    python scripts/build_delivery.py --stage 2        # -> stage-2-kiarash-akbari/
 
 The result mirrors the section 6 template::
 
@@ -39,6 +40,15 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DELIVERY_NAME = "stage-1-kiarash-akbari"
+
+#: Stage 2 answers live beside stage 1 rather than replacing it (AGENTS.md 1:
+#: stages chain). The delivery folder is assembled from the same source tree.
+STAGE2_NAME = "stage-2-kiarash-akbari"
+STAGE2_SOURCES = {"solution.ipynb": "stage2/solution.ipynb",
+                  "report.md": "stage2/report.md",
+                  "README.md": "stage2/README.md"}
+STAGE2_FILES = ("requirements.txt", "pyproject.toml", ".gitignore")
+STAGE2_TREES = ("src", "tests", "sql", "config", "scripts")
 
 FILES = ("solution.ipynb", "report.md", "requirements.txt", "README.md",
          "pyproject.toml", ".gitignore")
@@ -82,6 +92,66 @@ def _copy_curated(target: Path) -> list[str]:
             shutil.copy2(path, target / "data" / "curated" / name)
             copied.append(name)
     return copied
+
+
+def build_stage2(target: Path, *, force: bool) -> int:
+    """Assemble stage-2-kiarash-akbari/ from stage2/ plus the shared trees."""
+    missing = [source for source in STAGE2_SOURCES.values()
+               if not (PROJECT_ROOT / source).is_file()]
+    missing += [name for name in STAGE2_FILES if not (PROJECT_ROOT / name).is_file()]
+    if missing:
+        print(f"error: missing answer file(s): {missing}", file=sys.stderr)
+        return 1
+
+    notebook = PROJECT_ROOT / STAGE2_SOURCES["solution.ipynb"]
+    if not _notebook_is_executed(notebook):
+        print(
+            "warning: stage2/solution.ipynb has no saved outputs — run "
+            "'python -m nbconvert --to notebook --execute --inplace "
+            "stage2/solution.ipynb' first (AGENTS.md section 2.1.3).",
+            file=sys.stderr,
+        )
+
+    if target.exists():
+        if not force:
+            print(f"error: '{target}' already exists — re-run with --force to replace it",
+                  file=sys.stderr)
+            return 1
+        shutil.rmtree(target)
+
+    target.mkdir(parents=True)
+    for name, source in STAGE2_SOURCES.items():
+        shutil.copy2(PROJECT_ROOT / source, target / name)
+    for name in STAGE2_FILES:
+        shutil.copy2(PROJECT_ROOT / name, target / name)
+    for name in STAGE2_TREES:
+        shutil.copytree(PROJECT_ROOT / name, target / name, ignore=IGNORED)
+
+    (target / "data" / "raw").mkdir(parents=True, exist_ok=True)
+    (target / "data" / "curated").mkdir(parents=True, exist_ok=True)
+    (target / "data" / "db").mkdir(parents=True, exist_ok=True)
+
+    # The measurement artefacts are the evidence behind every number in the
+    # report; shipping them lets a reviewer read the raw JSON without running
+    # anything. They are gitignored because they are generated.
+    evidence_dir = PROJECT_ROOT / "data" / "db"
+    shipped = []
+    for name in ("load_report.json", "load_quarantine.jsonl",
+                 "index_experiments.json", "view_vs_snapshot.json"):
+        source = evidence_dir / name
+        if source.is_file():
+            shutil.copy2(source, target / "data" / "db" / name)
+            shipped.append(name)
+    if not shipped:
+        print("warning: no measurement artefacts in data/db — run "
+              "'data-factory db bootstrap' first so the delivery carries the "
+              "evidence behind the report's numbers", file=sys.stderr)
+
+    print(f"delivery folder: {target}")
+    for path in sorted(target.rglob("*")):
+        if path.is_file():
+            print(f"  {path.relative_to(target).as_posix():46s} {path.stat().st_size:>9,} B")
+    return 0
 
 
 def build(target: Path, *, force: bool) -> int:
@@ -146,8 +216,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="parent directory (default: the repository root)")
     parser.add_argument("--force", action="store_true",
                         help="replace the target folder if it already exists")
+    parser.add_argument("--stage", type=int, choices=(1, 2), default=1,
+                        help="which stage's answer folder to build (default: 1)")
     args = parser.parse_args(None if argv is None else argv)
     parent = Path(args.output).resolve() if args.output else PROJECT_ROOT
+
+    if args.stage == 2:
+        name = args.name if args.name != DELIVERY_NAME else STAGE2_NAME
+        return build_stage2(parent / name, force=args.force)
     return build(parent / args.name, force=args.force)
 
 
