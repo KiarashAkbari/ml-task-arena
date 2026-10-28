@@ -74,34 +74,44 @@ def verify(directory: Path) -> list[str]:
     return problems
 
 
-def extract_from_zip(archive: Path, dest: Path) -> None:
+def extract_members(bundle: zipfile.ZipFile, dest: Path, *,
+                    require_dir: str | None = None) -> int:
+    """Copy the expected CSVs out of an open archive; return how many.
+
+    ``require_dir`` names a directory the file must sit in, without pinning
+    where that directory is: both archives wrap everything in a top-level
+    folder (``dataset/`` for a Kaggle download, ``<repo>-main/dataset/`` for
+    the mirror), so matching on the start of the path silently extracted
+    nothing.  The file *name* still has to be one of the nine expected ones,
+    and ``verify`` re-checks every row count afterwards.
+    """
     dest.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for member in bundle.namelist():
+        parts = member.split("/")
+        base = parts[-1]
+        if not member.endswith(".csv") or base not in EXPECTED_ROWS:
+            continue
+        if require_dir is not None and require_dir not in parts[:-1]:
+            continue
+        with bundle.open(member) as source:
+            (dest / base).write_bytes(source.read())
+        written += 1
+    return written
+
+
+def extract_from_zip(archive: Path, dest: Path) -> None:
     with zipfile.ZipFile(archive) as bundle:
-        written = 0
-        for member in bundle.namelist():
-            base = member.split("/")[-1]
-            if base in EXPECTED_ROWS:
-                with bundle.open(member) as source:
-                    (dest / base).write_bytes(source.read())
-                written += 1
-        print(f"extracted {written} of {len(EXPECTED_ROWS)} expected files from {archive}")
+        written = extract_members(bundle, dest)
+    print(f"extracted {written} of {len(EXPECTED_ROWS)} expected files from {archive}")
 
 
 def extract_from_mirror(dest: Path) -> None:
     print(f"downloading a public mirror (~45 MB): {MIRROR}")
     with urlopen(MIRROR, timeout=300) as response:      # noqa: S310 - fixed URL
         payload = response.read()
-    dest.mkdir(parents=True, exist_ok=True)
-    written = 0
     with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
-        for member in bundle.namelist():
-            if not member.startswith(MIRROR_DIR) or not member.endswith(".csv"):
-                continue
-            base = member.split("/")[-1]
-            if base in EXPECTED_ROWS:
-                with bundle.open(member) as source:
-                    (dest / base).write_bytes(source.read())
-                written += 1
+        written = extract_members(bundle, dest, require_dir=MIRROR_DIR.rstrip("/"))
     print(f"extracted {written} of {len(EXPECTED_ROWS)} expected files")
 
 
