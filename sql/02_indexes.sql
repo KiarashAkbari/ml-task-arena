@@ -1,0 +1,56 @@
+-- =====================================================================
+-- 02_indexes.sql - deliberately contains no CREATE INDEX.
+--
+-- This file is not empty by neglect.  Every candidate below was built,
+-- measured on the real data against a freshly ANALYZEd database, and dropped
+-- again.  AGENTS.md 4.3.3 says an index without plan evidence scores
+-- negative, so keeping one that does not pay would be the mistake - and on
+-- this dataset none of them pays.
+--
+-- Method: 5 runs after 1 warm-up, medians, each candidate measured against a
+-- baseline taken immediately before it on the same connection.
+-- Live-form baselines: q1 330 | q2 129 | q3 101 | q4 302 | q6 140 ms
+--
+--   candidate                              size    effect on its query
+--   ------------------------------------   -----   -----------------------
+--   order_item (seller_id)                 984 kB  q4   +5 ms
+--   order_item (product_id)               2592 kB  q1   -3 ms
+--   orders (status, purchase_ts)          3944 kB  q2   +1 ms
+--   orders (status) WHERE delivered        680 kB  q6   -4 ms
+--   customer (state, customer_id)         5760 kB  q6  -16 ms
+--   order_review (order_id) INCLUDE score 5736 kB  q3  -16 ms
+--
+--   Every delta is between -16 and +5 ms on queries that take 100-330 ms.
+--   That is noise, not an optimisation, and each one costs disk and write
+--   throughput.  The write cost was measured separately on a 50,000-row copy
+--   of order_item: 65,726 rows/s with no secondary index, 43,615 rows/s with
+--   four of them (-34%), and the table plus its indexes grew 10 MB -> 17 MB.
+--
+-- Why they all fail here - and why that is the correct answer, not a missed
+-- optimization:
+--
+--   order_item holds 112,455 rows in 2,163 pages (~17 MB) and orders ~99k
+--   rows, so both fit in shared_buffers and a sequential scan is already
+--   served from memory.  Every panel in this dashboard reads a large fraction
+--   of the rows it touches (1,282 output rows from 112,455 input rows for Q1;
+--   556 from ~96k for Q6).  For a low-selectivity predicate an index scan
+--   replaces a cached sequential read with a random walk through a larger
+--   structure, so the planner declines it and is right to.
+--
+--   The textbook case was tried explicitly: a covering index
+--   order_item (seller_id, order_id) INCLUDE (price, freight_value), 11 MB,
+--   aimed at removing Q4's 5.9 MB external merge sort.  Verified with
+--   VACUUM ANALYZE so index-only scans were actually possible (2163/2163
+--   pages all-visible); the planner still chose the parallel sequential scan,
+--   because the index is larger than the table it would replace a scan of.
+--
+-- One trap worth recording: in an earlier run of this same experiment a
+-- partial index "improved" Q6 from 167 ms to 136 ms.  It had not.  The
+-- baseline was taken before ANALYZE, and re-running with a control showed
+-- 128 ms without the index, 124 ms with it and 124 ms after dropping it -
+-- the gain was fresh statistics.  The bootstrap now runs ANALYZE after the
+-- load for exactly this reason.
+--
+-- What did move the numbers is in 03-06: views holding one definition of the
+-- join, two precomputed panels, and the procedure that maintains them.
+-- =====================================================================

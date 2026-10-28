@@ -177,6 +177,22 @@ def bootstrap(
                 report.timings["load:factory.case_file"] = time.perf_counter() - start
                 report.tables["factory.case_file"] = factory_result.rows
 
+                # Fresh statistics before anything is measured against this
+                # database: without this the planner works from the empty-table
+                # estimates it had at CREATE time.  The difference was measured
+                # at 167 ms -> 128 ms on Q6, which is what made a partial index
+                # look useful in an earlier experiment.
+                start = time.perf_counter()
+                conn.execute(text("ANALYZE"))
+                report.timings["analyze"] = time.perf_counter() - start
+
+                # Build the precomputed dashboard panels in the same
+                # transaction as the load: a half-loaded database never gets a
+                # snapshot that describes it.
+                start = time.perf_counter()
+                conn.execute(text("CALL olist.refresh_dashboard_snapshot(NULL)"))
+                report.timings["snapshot_refresh"] = time.perf_counter() - start
+
                 for rejection in prepared.rejections:
                     conn.execute(
                         text(
@@ -194,6 +210,8 @@ def bootstrap(
                 f"olist.{table}": count_rows(conn, table) for table in OLIST_LOAD_ORDER
             }
             verified["factory.case_file"] = count_rows(conn, "case_file", schema="factory")
+            for snapshot in ("revenue_snapshot", "seller_leaderboard"):
+                verified[f"olist.{snapshot}"] = count_rows(conn, snapshot)
         report.checks["row_counts"] = verified
 
     report.timings["total"] = time.perf_counter() - wall_start
