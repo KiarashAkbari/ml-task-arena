@@ -1,0 +1,65 @@
+-- =====================================================================
+-- 02_indexes.sql - deliberately contains no CREATE INDEX.
+--
+-- This file is not empty by neglect.  Six candidates were built, measured on
+-- the real data and dropped again.  AGENTS.md 4.3.3 says an index without
+-- plan evidence scores negative, so keeping one that does not earn its cost
+-- would be the mistake.
+--
+-- The evidence is not "the numbers were small".  It is that the numbers do
+-- not reproduce.  The experiment can be run twice in a row, on the same
+-- connection, with no other change, and this is the shape of the answer:
+--
+--   candidate                        query   run A    run B   sign
+--   -------------------------------  -----   -----    -----   ------
+--   order_item (seller_id)            q4     -3.2    +6.0    flips
+--   order_item (product_id)           q1     -5.2    -5.3    same
+--   orders (status, purchase_ts)      q2     +4.0    -4.8    flips
+--   orders (status) WHERE delivered   q6     +7.9    +4.7    same
+--   customer (state, customer_id)     q6     -3.8    +0.8    flips
+--   customer (state, customer_id)     q2     -8.7    +3.1    flips
+--   order_review (order_id) INCLUDE   q3     +9.3    -3.3    flips
+--
+-- Five of seven pairs change sign between two consecutive runs of the same
+-- experiment.  A difference whose sign depends on which run you look at is
+-- not an effect, and no amount of averaging inside one run fixes that: the
+-- within-run measurement is precise (two consecutive medians of one unchanged
+-- query differ by 0.4%; across cold/warm states the same check gave 2.9% and
+-- 3.4%).  The problem is between-run reproducibility, not resolution.
+--
+-- Per-candidate sizes, so the cost side is not hand-waved: 984 kB, 2592 kB,
+-- 3944 kB, 696 kB, 5760 kB, 5736 kB - 19.2 MB in total, against a 16.9 MB
+-- heap for order_item, the table they were supposed to accelerate.
+--
+-- The textbook case was tried explicitly: a covering index
+-- order_item (seller_id, order_id) INCLUDE (price, freight_value), 11 MB,
+-- aimed at removing Q4's 5.8 MB external merge sort.  VACUUM ANALYZE was run
+-- first so index-only scans were genuinely possible (2163/2163 heap pages
+-- all-visible), and the plan was captured with the index in place.  The
+-- planner still chose the parallel sequential scan and Q4 still spilled to
+-- disk.  Note what the reason is *not*: the index is smaller than the heap
+-- (1447 pages vs 2163).  It fails because Q4 joins three tables and the index
+-- covers one of them, so the ordering it provides is destroyed by the join to
+-- orders and order_review before the aggregation that needs it.
+--
+-- Write cost, measured by inserting 50,000 rows into a copy of order_item
+-- with 0, 1, 2 and 4 secondary indexes:
+--   0 secondary indexes  ~67.7k rows/s   10 MB
+--   1 index              ~59.6k rows/s   11 MB   (-12%)
+--   2 indexes            ~53.6k rows/s   13 MB   (-21%)
+--   4 indexes            ~43.2k rows/s   17 MB   (-36%)
+-- That cost is paid on every write whether or not the read ever benefits.
+--
+-- One trap worth recording: in an earlier version of this experiment a
+-- partial index "improved" Q6 from 167 ms to 136 ms.  It had not.  The
+-- baseline was taken before ANALYZE, and a control run showed 128 ms without
+-- the index, 124 ms with it and 124 ms after dropping it - the gain was fresh
+-- statistics.  The bootstrap now runs ANALYZE after the load for this reason.
+--
+-- What did move the numbers is in 03-06: views holding one definition of the
+-- join, two precomputed panels, and the procedure that maintains them.
+--
+-- Reproduce all of the above from the notebook, section 6 ("Index: cost and
+-- evidence"); it builds, measures, drops and reports every candidate, and
+-- runs the replication check that the table above summarises.
+-- =====================================================================

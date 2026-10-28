@@ -15,6 +15,7 @@ import json
 import sys
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from data_factory import __version__
@@ -30,6 +31,7 @@ from data_factory.errors import (
     EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_UNEXPECTED,
+    ConfigError,
     DataFactoryError,
 )
 from data_factory.http_client import HttpClient, RetryPolicy
@@ -43,10 +45,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=("run", "fetch", "curate", "clean", "outputs"),
+        choices=("run", "fetch", "curate", "clean", "outputs", "db"),
         default="run",
         help="run = the whole pipeline (default); "
-             "fetch / curate / clean / outputs = one stage each",
+             "fetch / curate / clean / outputs = one stage each; "
+             "db = the Stage 2 PostgreSQL destination",
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        choices=("bootstrap", "status"),
+        default=None,
+        help="db sub-command: bootstrap = rebuild the database from sql/ and the "
+             "CSV sources; status = report what is currently loaded",
+    )
+    parser.add_argument(
+        "--url",
+        default=None,
+        metavar="URL",
+        help="PostgreSQL connection URL (default: the DATABASE_URL environment "
+             "variable), e.g. postgresql+psycopg://user:secret@localhost:5432/olist",
+    )
+    parser.add_argument(
+        "--source-dir",
+        default="data/raw/olist",
+        metavar="PATH",
+        help="directory holding the nine Olist CSV files (default: data/raw/olist)",
+    )
+    parser.add_argument(
+        "--curated",
+        default="data/curated/cases.csv",
+        metavar="PATH",
+        help="Stage 1 curated dataset loaded into the factory schema "
+             "(default: data/curated/cases.csv)",
     )
     parser.add_argument(
         "--version",
@@ -232,6 +263,60 @@ def _settings_as_json(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _resolve_database_url(args: argparse.Namespace) -> str:
+    """CLI flag first, environment second; a clear error if neither is set."""
+    import os
+
+    url = args.url or os.environ.get("DATABASE_URL")
+    if not url:
+        raise ConfigError(
+            "no database URL: pass --url postgresql+psycopg://user:secret@host:5432/olist "
+            "or export DATABASE_URL"
+        )
+    return url
+
+
+def _run_db(args: argparse.Namespace) -> None:
+    """Stage 2 destination: build or inspect the PostgreSQL database."""
+    from data_factory.db.bootstrap import bootstrap
+    from data_factory.db.connection import engine_scope
+    from data_factory.db.loader import OLIST_LOAD_ORDER, count_rows
+
+    url = _resolve_database_url(args)
+    action = args.action or "bootstrap"
+
+    if action == "status":
+        with engine_scope(url) as engine:
+            with engine.connect() as conn:
+                for table in OLIST_LOAD_ORDER:
+                    print(f"olist.{table}: {count_rows(conn, table):,} rows")
+                print(f"factory.case_file: {count_rows(conn, 'case_file', schema='factory'):,} rows")
+        return
+
+    report = bootstrap(
+        url,
+        source_dir=Path(args.source_dir),
+        curated_path=Path(args.curated),
+    )
+    print(f"db: {report.url}")
+    print(f"db: database created: {report.created_database}")
+    print(f"db: applied {len(report.ddl)} DDL script(s) from sql/")
+    for table, rows in sorted(report.tables.items()):
+        print(f"  {table}: {rows:,} rows")
+    quarantine = report.checks.get("quarantine", {})
+    print(
+        f"db: rejected {quarantine.get('rejected_rows', 0):,} row(s) in "
+        f"{quarantine.get('rejection_reasons', 0)} reason(s); "
+        f"repaired {quarantine.get('repaired_rows', 0):,} value(s)"
+    )
+    for rejection in report.rejections:
+        print(f"  {rejection['reason']}: {rejection['row_count']:,} ({rejection['source_file']})")
+    checks = report.checks
+    print(f"db: foreign-key orphans all zero: {checks.get('fk_all_zero')}")
+    print(f"db: CHECK constraints refused every probe: {checks.get('constraints_all_enforced')}")
+    print(f"db: total {report.timings['total']:.1f}s")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI and return a process exit code.
 
@@ -244,6 +329,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         print(__version__)
         return EXIT_OK
+
+    if args.action is not None and args.command != "db":
+        parser.error(f"'{args.action}' is a sub-command of 'db', not '{args.command}'")
+
+    if args.command == "db":
+        try:
+            _run_db(args)
+            return EXIT_OK
+        except DataFactoryError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return exc.exit_code
+        except Exception:
+            traceback.print_exc()
+            return EXIT_UNEXPECTED
 
     if args.since_last_run and args.command not in ("run", "fetch"):
         # Usage error (exit 2, argparse's own code): the flag chooses a fetch
