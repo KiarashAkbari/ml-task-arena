@@ -241,12 +241,14 @@ Q5_PAYMENTS = Query(
 
 Q6_PERCENTILES = Query(
     key="q6",
-    title="Q6 - delivery-delay percentiles by state and month (no index can rescue this)",
+    title="Q6 - delivery-delay percentiles by state and month (added by me)",
     decision=(
-        "percentile_cont needs every delivered order sorted inside its "
-        "(state, month) group, so cost tracks rows read, not rows returned. Six "
-        "index candidates were built and measured against this query; the best "
-        "removed 23 of its 239 ms. It is answered by a maintained snapshot instead."
+        "I added this sixth query myself to probe the one shape the five product "
+        "questions never produce: percentile_cont must sort every delivered order "
+        "inside its (state, month) group, so cost tracks rows read rather than rows "
+        "returned, and no index can remove the sort. Index candidates were built and "
+        "measured against it and moved it by single-digit milliseconds - inside the "
+        "noise floor - so it is served live rather than from a snapshot."
     ),
     live_sql="""
         SELECT state,

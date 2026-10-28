@@ -63,8 +63,10 @@ def truncate(table: str, schema: str = "olist") -> TextClause:
     return text("TRUNCATE " + table_ref(table, schema))
 
 
-def drop_index(name: str, schema: str = "olist") -> TextClause:
-    return text(f"DROP INDEX {ident(schema)}.{ident(name)}")
+def drop_index(name: str, schema: str = "olist", *,
+               if_exists: bool = False) -> TextClause:
+    guard = "IF EXISTS " if if_exists else ""
+    return text(f"DROP INDEX {guard}{ident(schema)}.{ident(name)}")
 
 
 def create_index(name: str, target: str) -> TextClause:

@@ -74,7 +74,11 @@ from data_factory.db.bootstrap import bootstrap
 from data_factory.db.connection import engine_scope, redact_url
 from data_factory.db.evidence import (
     index_experiments,
+    noise_floor,
+    rejection_impact,
     insert_cost_experiment,
+    covering_index_probe,
+    index_replication_history,
     query_evidence,
     result_frame,
     view_vs_snapshot,
@@ -199,10 +203,20 @@ add(md(r'''
 '''))
 
 add(code(r'''
+# مخرج کسر شمارش واقعی فایل‌هاست، نه عددی که کسی از حافظه بنویسد.
+# (نسخه‌ی اول این سلول مخرج را دستی ۱٬۱۲۴٬۰۰۰ گذاشته بود؛ عدد واقعی
+# ۱٬۵۵۰٬۹۲۲ است، یعنی هر درصد در آن نسخه ۳۸٪ غلط بود.)
+with engine_scope(DB_URL) as engine:
+    impact = rejection_impact(SOURCE_DIR, engine=engine)
+
 rejections = pd.DataFrame(report.rejections)
 by_reason = (rejections.groupby("reason", as_index=False)["row_count"].sum()
              .sort_values("row_count", ascending=False))
-by_reason["share_of_raw_pct"] = (100 * by_reason["row_count"] / 1_124_000).round(4)
+by_reason["share_of_raw_pct"] = (
+    100 * by_reason["row_count"] / impact["total_raw_records"]).round(4)
+
+print(f"کل رکورد خام (شمارش واقعی {impact['files_counted']} فایل): "
+      f"{impact['total_raw_records']:,}")
 print(f"کل رکوردهای ردشده: {int(by_reason['row_count'].sum()):,}")
 by_reason
 '''))
@@ -214,7 +228,29 @@ repairs[["source_file", "reason", "row_count"]]
 '''))
 
 add(md(r'''
-### ۱.۲ شاهد اینکه محدودیت‌ها واقعاً کار می‌کنند
+### ۱.۲ این سیاست چه هزینه‌ای دارد؟ — با عدد، و با دو محاسبه‌ی مستقل
+
+رد کردن رکورد رایگان نیست: ۱۷۴ سفارش و آیتم‌هایشان از تحلیل بیرون می‌مانند. باید بدانیم این
+حذف چه کسری از درآمد را می‌برد. یک عدد که فقط از یک مسیر کد بیرون بیاید، عدد نیست؛ پس این‌جا
+دو محاسبه‌ی مستقل انجام می‌شود و **باید یکی دربیایند**:
+
+۱. از فایل‌های خام، با همان قاعده‌ی رد کردن.
+۲. از پایگاه‌داده، جمع درآمد آیتم‌هایی که واقعاً بارگذاری شدند.
+'''))
+
+add(code(r'''
+print(f"درآمد کل (خام)            : R$ {impact['total_revenue']:,.2f}")
+print(f"درآمد حذف‌شده با رد کردن   : R$ {impact['lost_revenue']:,.2f}"
+      f"  ({impact['lost_share_pct']}%)")
+print(f"انتظار از محاسبه‌ی خام     : R$ {impact['kept_revenue_expected']:,.2f}")
+print(f"واقعیت در پایگاه‌داده      : R$ {impact['kept_revenue_actual']:,.2f}")
+print(f"دو محاسبه یکی درآمدند     : {impact['cross_check_matches']}")
+print(f"سفارش‌های ردشده: {impact['rejected_orders']} | "
+      f"آیتم‌های حذف‌شده: {impact['rejected_items']}")
+'''))
+
+add(md(r'''
+### ۱.۳ شاهد اینکه محدودیت‌ها واقعاً کار می‌کنند
 
 محدودیتی که هرگز چیزی را رد نکرده، شاهد نیست. چهار محدودیت نمونه با درج عمداً نامعتبر داخل
 savepoint آزمایش می‌شوند و هر چهار مورد باید رد شوند.
@@ -414,6 +450,12 @@ summary["speedup"] = [
         summary["live_median_ms"], summary["served_median_ms"], summary["served_from"])
 ]
 print("بودجه‌ی ۲۰۰ms — همه رعایت شد:", bool(summary["within_200ms"].all()))
+
+# حاشیه‌ی اطمینان: کدام کوئری به سقف نزدیک‌تر است؟ بودجه قابل مذاکره نیست،
+# پس «پاس شد» بدون گفتن «چقدر جا داشت» نصف جواب است.
+tightest = summary.loc[summary["max_ms"].idxmax()]
+print(f"تنگ‌ترین کوئری: {tightest['query']} با بدترین نمونه‌ی"
+      f" {tightest['max_ms']:.2f} ms — حاشیه {200 - tightest['max_ms']:.2f} ms")
 summary
 '''))
 
@@ -479,6 +521,26 @@ Index مجانی نیست: فضا می‌گیرد و سرعت درج را کم �
 `ANALYZE` اجرا می‌کند.
 '''))
 
+add(md(r'''
+### ۶.۰ کف نوفه: قبل از اینکه هر اختلافی را «بهبود» بنامیم
+
+دو بار اندازه‌گیری یک کوئری **دست‌نخورده** با هم فرق دارند. آن اختلاف، کف نوفه است و هر
+«بهبودی» کوچک‌تر از آن، بهبود نیست. این اندازه‌گیری، معیار درست برای خواندن جدول بعدی است.
+'''))
+
+add(code(r'''
+with engine_scope(DB_URL) as engine:
+    floor = noise_floor(engine, BY_KEY["q2"].served_sql, runs=7)
+
+print(f"یک کوئری، دو اندازه‌گیری پشت سر هم (هر کدام {floor['runs_each']} اجرا):")
+print(f"  اولی  : median {floor['first_median_ms']:7.2f} ms   p95 {floor['first_p95_ms']:7.2f}")
+print(f"  دومی  : median {floor['second_median_ms']:7.2f} ms   p95 {floor['second_p95_ms']:7.2f}")
+print(f"  اختلاف: {floor['difference_ms']:+.2f} ms  ({floor['spread_pct']}%) "
+      f"بدون اینکه هیچ چیزی در پایگاه‌داده عوض شده باشد")
+print()
+print("پس هر اختلافی در حد این عدد، درباره‌ی Index حرف نمی‌زند؛ درباره‌ی نوفه حرف می‌زند.")
+'''))
+
 add(code(r'''
 with engine_scope(DB_URL) as engine:
     candidates = index_experiments(engine, runs=5)
@@ -497,6 +559,25 @@ for item in candidates:
 index_table = pd.DataFrame(rows)
 print("بهترین بهبود در کل کاندیدها:", f"{index_table['delta_ms'].min():+.0f} ms")
 print("بدترین اثر:", f"{index_table['delta_ms'].max():+.0f} ms")
+
+# مجموع حجم Indexها در برابر جدولی که بیشترشان سرویس می‌دهند — عددی که
+# صورت مسئله می‌خواهد و در جدول بالا پخش است.
+def _kb(label):
+    value, unit = label.split()
+    return float(value) * (1024 if unit == "MB" else 1)
+
+total_kb = sum(_kb(item["size"]) for item in candidates)
+with engine_scope(DB_URL) as engine:
+    with engine.connect() as conn:
+        heap_pages = conn.execute(
+            text("SELECT relpages FROM pg_class WHERE relname = 'order_item'")
+        ).scalar_one()
+
+print()
+print(f"مجموع شش Index: {total_kb / 1024:.1f} مگابایت"
+      f"  در برابر {heap_pages * 8 / 1024:.1f} مگابایت هیپ order_item")
+print(f"یعنی Indexها {total_kb / 1024 / (heap_pages * 8 / 1024):.2f} برابر"
+      " جدولی می‌شدند که قرار بود سریع‌ترش کنند.")
 index_table
 '''))
 
@@ -513,28 +594,59 @@ insert_table
 '''))
 
 add(md(r'''
-### ۶.۱ نتیجه: هیچ Indexی در این دیتاست سود نداد
+### ۶.۱ نتیجه: هیچ‌کدام از شش Index ارزش ساختن نداشت
 
-همه‌ی کاندیدها ساخته و اندازه‌گیری شدند و **همه حذف شدند**. شاهدش فقط «کوچک بودن عدد»
-نیست: این آزمایش دو بار در دو وضعیت cache مختلف اجرا شد و **علامت اختلاف‌ها بین دو اجرا
-عوض شد** (مثلاً `order_item(product_id)` در یک اجرا ۲۸ میلی‌ثانیه بهتر شد و در اجرای دیگر
-۲۷ میلی‌ثانیه بدتر). چیزی که علامتش با هر بار اجرا عوض می‌شود، اثر نیست؛ نوفه است. فایل `sql/02_indexes.sql` به همین
-دلیل `CREATE INDEX` ندارد و به‌جایش جدول اندازه‌گیری‌ها را نگه می‌دارد.
+هر شش کاندید ساخته و اندازه‌گیری شدند و **همه حذف شدند**. دلیلش «اینکه هر Index بد است» نیست.
+دلیلش این است که روی این حجم داده، اثرشان از نوسانِ خودِ اندازه‌گیری جدا نمی‌شود.
 
-**چرا؟** `order_item` با ۱۱۲٬۴۵۵ سطر در ۲٬۱۶۳ صفحه (حدود ۱۷ مگابایت) جا می‌شود و در
-`shared_buffers` می‌ماند. اسکن ترتیبی روی داده‌ی کش‌شده ارزان است، و هر شش پرس‌وجو کسر بزرگی از
-سطرهایی را که لمس می‌کنند برمی‌گردانند (Q1: ۱٬۲۸۲ سطر خروجی از ۱۱۲٬۴۵۵ سطر ورودی). برای چنین
-گزینش‌پذیری پایینی، Index Scan یک خواندن ترتیبی کش‌شده را با پیمایش تصادفی در ساختاری بزرگ‌تر
-عوض می‌کند — و پلن‌ساز آن را رد می‌کند و **درست می‌کند**.
+اندازه‌گیری Index یک‌باره معنا ندارد: وضعیت cache، زمان‌بندی workerهای موازی و autovacuum
+هر اجرا کمی فرق می‌کند. پس هر اجرای این نوت‌بوک آزمایش را **دو بار پشت سر هم** اجرا می‌کند و
+هر مشاهده را در `data/db/index_replications.json` نگه می‌دارد؛ جدول پایین هر جفت
+(Index × کوئری) را روی **همه‌ی مشاهده‌های ثبت‌شده** خلاصه می‌کند. ستون `span_ms` اختلاف
+کمینه و بیشینه است — یعنی عددِ یک اجرا فقط به‌اندازه‌ی همین دامنه معتبر است.
+'''))
 
-حتی حالت کتابی هم امتحان شد: یک Index پوشا روی
-`order_item (seller_id, order_id) INCLUDE (price, freight_value)` (۱۱ مگابایت) برای حذف
-مرتب‌سازی ۵.۹ مگابایتی Q4. با `VACUUM ANALYZE` تأیید شد که Index-Only Scan واقعاً ممکن است
-(۲۱۶۳ از ۲۱۶۳ صفحه all-visible)؛ پلن‌ساز باز هم اسکن ترتیبی موازی را ترجیح داد، چون Index از
-جدولی که جایگزین اسکنش می‌شود بزرگ‌تر است.
+add(code(r'''
+# تکرارپذیری: دو بار پشت سر هم در همین اجرا، به‌علاوه‌ی همه‌ی مشاهده‌های قبلی
+# که در فایل نگه داشته شده‌اند. span_ms = بیشینه - کمینه برای همان جفت.
+with engine_scope(DB_URL) as engine:
+    replication, span_table = index_replication_history(engine, runs=5)
 
-**هزینه‌ی درج** (جدول بالا): با چهار Index سرعت درج به‌طور محسوس کم می‌شود و حجم جدول از ۱۰ به
-۱۷ مگابایت می‌رسد. این هزینه‌ای است که هر Index تحمیل می‌کند، حتی وقتی سودی ندارد.
+print(f"مشاهده‌های ثبت‌شده: {len(replication)}"
+      f"  |  جفت‌های Index×کوئری: {len(span_table)}")
+print(f"بیشترین دامنه‌ی نوسان یک جفت: {span_table['span_ms'].max():.1f} ms")
+print()
+print("دامنه‌ی نوسان هر جفت، از بزرگ به کوچک:")
+span_table
+'''))
+
+add(md(r'''
+دامنه‌ی بالا یعنی عددی که یک اجرا برای یک Index می‌دهد، به‌اندازه‌ی خودِ آن عدد هم می‌تواند
+جابه‌جا شود. پس هیچ‌کدام از این شش «برد» قابل اتکا نبود — و هیچ‌کدام هم لازم نشد: هر شش کوئری
+بدون هیچ Index زیر بودجه‌اند. تنها کوئری‌ای که حاشیه‌ی کمی دارد Q6 است (جدول بخش ۵)؛ اگر روزی
+حاشیه‌ی بیشتری لازم شود، مسیرش snapshot است، نه شرط‌بندی روی چند میلی‌ثانیه.
+
+**چرا سودها این‌قدر کوچک‌اند؟** `order_item` با ۱۱۲٬۴۵۵ سطر در ۲٬۱۶۳ صفحه (حدود ۱۷ مگابایت)
+جا می‌شود و در `shared_buffers` می‌ماند؛ `orders` هم ۱٬۸۰۵ صفحه (حدود ۱۴ مگابایت). اسکن ترتیبی
+روی داده‌ی کش‌شده ارزان است و هر شش پرس‌وجو کسر بزرگی از سطرهای لمس‌شده را برمی‌گردانند
+(Q1: ۱٬۲۸۲ سطر خروجی از ۱۱۲٬۴۵۵ ورودی). برای گزینش‌پذیری پایین، Index Scan یک خواندن ترتیبی
+کش‌شده را با پیمایش تصادفی در ساختاری بزرگ‌تر عوض می‌کند، و بیشترین چیزی که می‌شود از این
+معامله درآورد چند میلی‌ثانیه است — نه مرتبه‌ی بزرگی که بودجه‌ی ۲۰۰ms به آن نیاز داشته باشد.
+
+همین اندازه‌گیری برای «مجموع حجم» هم جواب می‌دهد: شش Index روی هم **۱۹٫۲ مگابایت** می‌شوند، در
+برابر ۱۶٫۹ مگابایت هیپِ جدولی که بیشترشان باید سریع‌ترش کنند. یعنی نسخه‌ی پرِ Index از این
+طرح، بیشتر از خودِ داده فضا می‌گرفت.
+
+حتی حالت کتابی هم امتحان شد: Index پوشای Q4 در بخش ۷٫۱ ساخته، `VACUUM ANALYZE` داده و
+اندازه‌گیری شد — و پلن‌ساز انتخابش نکرد. جزئیات و اعدادش همان‌جا است، تا یک عدد دو جا
+تکرار نشود و از هم جدا نیفتد.
+
+**هزینه‌ی درج** (جدول بالا): با چهار Index سرعت درج حدود یک‌سوم کم می‌شود و حجم جدول از ۱۰ به
+۱۷ مگابایت می‌رسد. این هزینه را هر Index تحمیل می‌کند، حتی وقتی سودش قابل اندازه‌گیری نیست.
+
+جمع‌بندی صادقانه‌ی این بخش: شش Index، سه اثر ممکن، و یک نتیجه — روی این حجم داده، هیچ Indexی
+به اندازه‌ای که به آن نیاز داشته باشیم سود نداد. خالی‌بودن `sql/02_indexes.sql` تصادفی نیست،
+حاصل اندازه‌گیری است.
 '''))
 
 # ============================================================ hard query
@@ -552,8 +664,10 @@ add(md(r'''
 3. **سه متریک از سه جهت مختلف.** درآمد از `order_item`، زمان آماده‌سازی از `orders`، و امتیاز
    از `order_review`. هر Index فقط می‌تواند یکی از این سه مسیر را سرویس کند.
 
-سه بازنویسی و شش Index امتحان شد و بهترین نتیجه‌ی زنده بالای بودجه ماند. راه‌حل، Index نبود:
-**محاسبه‌ی از پیش** (بخش بعد) — و آنچه در عوضش پرداختیم، تازگی داده است.
+شش کاندید Index (بخش ۶) و Index پوشای بخش ۷٫۱ روی این کوئری امتحان شد و بهترین نتیجه‌ی زنده
+بالای بودجه ماند. راه‌حل، Index نبود: **محاسبه‌ی از پیش** (بخش بعد) — و آنچه در عوضش پرداختیم،
+تازگی داده است. همین کوئری حالا از snapshot در کمتر از یک میلی‌ثانیه سرو می‌شود؛ عدد
+دقیقش در جدول بودجه‌ی بخش ۵ است.
 '''))
 
 add(code(r'''
@@ -572,6 +686,41 @@ print(f"زمان زنده: {q4_plan.execution_ms:.1f} ms")
 print("Seq Scan روی:", ", ".join(sorted(set(q4_plan.seq_scans))))
 print()
 print("سرریز مرتب‌سازی روی دیسک، همان هزینه‌ای است که Index باید حذف می‌کرد و نکرد.")
+'''))
+
+add(md(r'''### ۷.۱ همان Index کتابی، این بار ساخته و اندازه‌گیری‌شده
+
+ادعای «حتی Index پوشا هم نجاتش نداد» بدون ساخت آن ادعا، ادعا نیست. پس Index پوشای
+`order_item (seller_id, order_id) INCLUDE (price, freight_value)` ساخته می‌شود، `VACUUM ANALYZE`
+می‌گیرد تا واقعاً Index-Only Scan ممکن باشد، پلن گرفته می‌شود و بعد Index حذف می‌شود تا
+پایگاه‌داده در همان وضعیت بی‌Indexِ بقیه‌ی نوت‌بوک بماند.
+
+سه عدد برای خواندن: حجم Index در برابر حجم جدول، درصد صفحه‌های all-visible، و اینکه پلن
+پوشا را انتخاب کرد یا نه.
+'''))
+
+add(code(r'''
+# ادعای بالا، ساخته و اندازه‌گیری‌شده — Index در پایان حذف می‌شود.
+with engine_scope(DB_URL) as engine:
+    cover = covering_index_probe(engine, BY_KEY["q4"].live_sql)
+
+print("Index پوشا:", cover["target"])
+print(f"حجم Index: {cover['index_size']} ({cover['index_pages']} صفحه)"
+      f"  در برابر جدول: {cover['heap_pages']} صفحه")
+print(f"صفحه‌های all-visible جدول: {cover['heap_all_visible_pages']}"
+      f" از {cover['heap_pages']} ({cover['heap_all_visible_pct']}%)"
+      "  → Index-Only Scan ممکن بود")
+print()
+print("\n".join(cover["plan_lines"][:8]))
+print()
+print(f"زمان با Index پوشا: {cover['execution_ms']} ms")
+print("Index Scan روی:", ", ".join(cover["index_scans"]) or "هیچ")
+print("Index انتخاب شد؟", cover["used_the_index"])
+print()
+print("پلن‌ساز همان Parallel Seq Scan را انتخاب کرد و همان مرتب‌سازی ۵٫۸ مگابایتی"
+      " روی دیسک ماند. دلیلش اندازه نیست — Index از هیپ کوچک‌تر است — بلکه این است که"
+      " Q4 سه جدول را می‌پیوندد و Index فقط یکی را پوشش می‌دهد؛ ترتیبی که Index می‌دهد"
+      " بعد از پیوند با orders و order_review از بین می‌رود.")
 '''))
 
 # ============================================================ views

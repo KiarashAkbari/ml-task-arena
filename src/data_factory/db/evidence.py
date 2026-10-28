@@ -11,7 +11,9 @@ what makes them easy to display, dump to JSON, and re-run.
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -300,3 +302,252 @@ def load_summary(path: str = "data/db/load_report.json") -> dict[str, Any]:
     if not report.is_file():
         return {}
     return json.loads(report.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# 5. what the rejection policy costs, and how repeatable a measurement is
+# ---------------------------------------------------------------------------
+
+
+def rejection_impact(source_dir, engine=None) -> dict[str, Any]:
+    """Revenue removed by the quarantine policy, computed from the raw CSVs.
+
+    The rule is applied here exactly as ``olist.prepare`` applies it.  When an
+    engine is supplied the result is cross-checked against what actually got
+    loaded, so the cost is verified by two independent code paths instead of
+    being taken on trust from one.
+
+    The total record count is returned too, because every "share of raw" figure
+    in the notebook divides by it - and a denominator that is typed in by hand
+    is a number nobody measured.
+    """
+    import csv
+    from pathlib import Path
+
+    import pandas as pd
+
+    source = Path(source_dir)
+    files = sorted(source.glob("*.csv"))
+    total_records = 0
+    for path in files:
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            next(reader, None)
+            total_records += sum(1 for _ in reader)
+
+    orders = pd.read_csv(source / "olist_orders_dataset.csv", dtype=str)
+    items = pd.read_csv(source / "olist_order_items_dataset.csv", dtype=str)
+
+    def parsed(column: str):
+        return pd.to_datetime(orders[column], errors="coerce")
+
+    delivered_without_date = (
+        orders["order_status"].eq("delivered") & orders["order_delivered_customer_date"].isna()
+    )
+    carrier_before_purchase = (
+        parsed("order_delivered_carrier_date") < parsed("order_purchase_timestamp")
+    ).fillna(False)
+    rejected_ids = set(
+        orders.loc[delivered_without_date | carrier_before_purchase, "order_id"]
+    )
+
+    revenue = pd.to_numeric(items["price"]) + pd.to_numeric(items["freight_value"])
+    total_revenue = float(revenue.sum())
+    lost = items["order_id"].isin(rejected_ids)
+    lost_revenue = float(revenue[lost].sum())
+
+    payload: dict[str, Any] = {
+        "total_raw_records": total_records,
+        "files_counted": len(files),
+        "rejected_orders": len(rejected_ids),
+        "rejected_items": int(lost.sum()),
+        "total_revenue": round(total_revenue, 2),
+        "lost_revenue": round(lost_revenue, 2),
+        "lost_share_pct": round(100.0 * lost_revenue / total_revenue, 4) if total_revenue else 0.0,
+        "kept_revenue_expected": round(total_revenue - lost_revenue, 2),
+    }
+
+    if engine is not None:
+        with engine.connect() as conn:
+            loaded = conn.execute(
+                text("SELECT round(sum(price + freight_value), 2) FROM olist.order_item")
+            ).scalar_one()
+        payload["kept_revenue_actual"] = float(loaded)
+        payload["cross_check_matches"] = abs(float(loaded) - payload["kept_revenue_expected"]) < 0.01
+    return payload
+
+
+def noise_floor(engine: Engine, sql: str, *, runs: int = 7) -> dict[str, Any]:
+    """Measure the same unchanged query twice, to bound what a delta can mean.
+
+    Two consecutive measurements of an identical query differ by some amount
+    that has nothing to do with any index.  That difference is the floor below
+    which a "speed-up" is not a speed-up, and it is the honest yardstick for
+    every index delta in this project.
+    """
+    with engine.connect() as conn:
+        first = measure(conn, sql, runs=runs, warmup=2)
+        second = measure(conn, sql, runs=runs, warmup=2)
+    return {
+        "runs_each": runs,
+        "first_median_ms": round(first.median_ms, 2),
+        "second_median_ms": round(second.median_ms, 2),
+        "difference_ms": round(second.median_ms - first.median_ms, 2),
+        "absolute_difference_ms": round(abs(second.median_ms - first.median_ms), 2),
+        "spread_pct": round(
+            100.0 * abs(second.median_ms - first.median_ms) / max(first.median_ms, 0.01), 1
+        ),
+        "first_p95_ms": round(first.p95_ms, 2),
+        "second_p95_ms": round(second.p95_ms, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 8. the textbook index that still does not rescue Q4
+# ---------------------------------------------------------------------------
+
+#: The covering index a textbook would prescribe for Q4: seek order_item by
+#: seller, and read price/freight straight from the index leaf so the per-order
+#: deduplication never touches the heap.
+COVERING_INDEX = "ix_order_item_seller_order_cover"
+COVERING_TARGET = (
+    "olist.order_item (seller_id, order_id) INCLUDE (price, freight_value)"
+)
+
+
+def covering_index_probe(
+    engine: Engine, query_sql: str, *, key: str = "q4"
+) -> dict[str, Any]:
+    """Build the textbook covering index, prove it is usable, and show the
+    planner still refusing it.
+
+    "Usable" is not a guess: after ``VACUUM ANALYZE`` the heap is fully
+    all-visible, so an index-only scan really is *possible* here.  The plan is
+    then captured with the index in place.  The index is dropped before the
+    function returns, so the database ends in the no-index state the rest of
+    the notebook reports.
+
+    Returns a plain dict so the notebook can print it and the JSON dump can
+    keep it.
+    """
+    result: dict[str, Any] = {"index": COVERING_INDEX, "target": COVERING_TARGET}
+
+    # VACUUM cannot run inside a transaction block, so this connection is
+    # autocommit.  CREATE INDEX is happy either way; it stays here so both
+    # statements share one connection.
+    with engine.connect().execution_options(
+        isolation_level="AUTOCOMMIT"
+    ) as conn:
+        conn.execute(sqltext.drop_index(COVERING_INDEX, if_exists=True))
+        conn.execute(sqltext.create_index(COVERING_INDEX, COVERING_TARGET))
+        conn.execute(text("VACUUM ANALYZE olist.order_item"))
+
+    try:
+        with engine.connect() as conn:
+            result["index_size"] = conn.execute(
+                text("SELECT pg_size_pretty(pg_relation_size(CAST(:i AS regclass)))"),
+                {"i": f"olist.{COVERING_INDEX}"},
+            ).scalar_one()
+            result["index_pages"] = conn.execute(
+                text(
+                    "SELECT relpages FROM pg_class WHERE relname = :n"
+                ),
+                {"n": COVERING_INDEX},
+            ).scalar_one()
+            heap_pages, heap_visible = conn.execute(
+                text(
+                    "SELECT relpages, relallvisible FROM pg_class "
+                    "WHERE relname = 'order_item' AND relkind = 'r'"
+                )
+            ).one()
+            result["heap_pages"] = int(heap_pages)
+            result["heap_all_visible_pages"] = int(heap_visible)
+            result["heap_all_visible_pct"] = round(
+                100.0 * heap_visible / heap_pages, 1
+            ) if heap_pages else None
+
+            plan = explain(conn, query_sql, key=f"{key}-covering")
+            result["execution_ms"] = round(plan.execution_ms, 2)
+            result["seq_scans"] = sorted(set(plan.seq_scans))
+            result["index_scans"] = sorted(set(plan.index_scans))
+            result["used_the_index"] = any(
+                "ix_order_item_seller_order_cover" in str(s)
+                for s in plan.index_scans
+            )
+            result["plan_lines"] = [
+                line for line in plan.text_plan.splitlines()
+                if any(
+                    token in line
+                    for token in (
+                        "Sort Method", "external merge", "Index Only Scan",
+                        "Index Scan", "Seq Scan", "GroupAggregate",
+                    )
+                )
+            ]
+    finally:
+        with engine.connect().execution_options(
+            isolation_level="AUTOCOMMIT"
+        ) as conn:
+            conn.execute(sqltext.drop_index(COVERING_INDEX, if_exists=True))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 9. reproducibility: what the same index measurement does when repeated
+# ---------------------------------------------------------------------------
+
+#: Every replication ever recorded, appended by the notebook and committed.
+#: Committing the history is the point: a claim like "this delta does not
+#: reproduce" can only be checked against the observations it is based on.
+INDEX_HISTORY = "data/db/index_replications.json"
+
+
+def index_replication_history(
+    engine: Engine, *, runs: int = 5, path: str = INDEX_HISTORY,
+    keep: int = 10
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Run the index experiment twice, append both passes to a kept history,
+    and summarise how far each (index, query) pair has moved over time.
+
+    Returns ``(history, summary)``.  ``history`` is every observation currently
+    kept; ``summary`` is one row per pair with the number of observations, the
+    smallest and largest delta, and the span between them.  The span is the
+    honest error bar of a single-run measurement.
+    """
+    from datetime import datetime, timezone
+
+    observations: list[dict[str, Any]] = []
+    if Path(path).exists():
+        observations = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for tag in ("pass-1", "pass-2"):
+        for item in index_experiments(engine, runs=runs):
+            for query, effect in item["effects"].items():
+                observations.append({
+                    "at": stamp,
+                    "pass": tag,
+                    "index": item["index"],
+                    "query": query,
+                    "delta_ms": round(float(effect["delta_ms"]), 2),
+                })
+
+    # Keep only the newest ``keep`` sessions so the file cannot grow forever.
+    stamps = sorted({o["at"] for o in observations})[-keep:]
+    observations = [o for o in observations if o["at"] in stamps]
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(observations, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+
+    history = pd.DataFrame(observations)
+    summary = (
+        history.groupby(["index", "query"])["delta_ms"]
+        .agg(observations="count", min_ms="min", max_ms="max")
+        .assign(span_ms=lambda d: (d["max_ms"] - d["min_ms"]).round(2))
+        .reset_index()
+        .sort_values("span_ms", ascending=False)
+    )
+    return history, summary

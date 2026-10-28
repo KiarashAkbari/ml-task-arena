@@ -136,8 +136,13 @@ def build_stage2(target: Path, *, force: bool) -> int:
     # anything. They are gitignored because they are generated.
     evidence_dir = PROJECT_ROOT / "data" / "db"
     shipped = []
+    # Only artefacts the delivered notebook run itself writes: the load
+    # report and quarantine log come from its bootstrap, the replication
+    # history from its index section.  Standalone script outputs are left
+    # behind on purpose - they are measurements of a *different* run, and
+    # shipping them next to this report would contradict its numbers.
     for name in ("load_report.json", "load_quarantine.jsonl",
-                 "index_experiments.json", "view_vs_snapshot.json"):
+                 "index_replications.json"):
         source = evidence_dir / name
         if source.is_file():
             shutil.copy2(source, target / "data" / "db" / name)
