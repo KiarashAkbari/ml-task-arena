@@ -4,20 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "data-factory"
-version = "0.1.0"
-description = "Reproducible NYC 311 dataset factory (Term 3, Stage 1)"
+version = "0.2.0"
+description = "Term 3 data factory (Stage 1) and its PostgreSQL dashboard destination (Stage 2)"
 readme = "README.md"
-requires-python = ">=3.9"
-# Keep these exact pins in sync with requirements.txt.
+# numpy 2.4.6 and sqlalchemy 2.1.6 are pinned below and both require >=3.11, so
+# claiming support for 3.9 or 3.10 would be a promise pip cannot keep.
+requires-python = ">=3.11"
+# Keep these exact pins in sync with requirements.txt. The database driver lives
+# here rather than in an extra: `data_factory.db` imports sqlalchemy at module
+# level, so a plain `pip install -e .` must produce a working database layer
+# (delivery guide section 8 makes reproducibility a precondition).
 dependencies = [
     "pandas==2.2.3",
     "requests==2.32.3",
+    "sqlalchemy==2.1.6",
+    "psycopg[binary]==3.3.6",
 ]
 
 [project.optional-dependencies]
-# The notebook (not the factory) needs plotting; the analysis module also
+# The notebooks (not the factory) need plotting; the analysis module also
 # imports numpy, which pandas already pulls in. `pip install -r
-# requirements.txt` installs the full analysis set used by the delivery.
+# requirements.txt` installs the full analysis set used by the deliveries.
 notebook = [
     "numpy==2.4.6",
     "matplotlib==3.9.2",
