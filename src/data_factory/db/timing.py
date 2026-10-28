@@ -21,6 +21,8 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from data_factory.db import sqltext
+
 DEFAULT_RUNS = 7
 DEFAULT_WARMUP = 2
 
@@ -135,12 +137,12 @@ def explain(conn: Connection, sql: str, *, key: str = "",
             params: dict[str, Any] | None = None) -> PlanCapture:
     """EXPLAIN ANALYZE the query and summarise which scans it chose."""
     raw = conn.execute(
-        text(f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}"), params or {}
+        sqltext.explain(sql, analyze=True, buffers=True, as_json=True), params or {}
     ).scalar_one()
     plan_root = (raw[0] if isinstance(raw, list) else raw)["Plan"]
     execution_ms = float((raw[0] if isinstance(raw, list) else raw)["Execution Time"])
     text_plan = conn.execute(
-        text(f"EXPLAIN (ANALYZE, BUFFERS) {sql}"), params or {}
+        sqltext.explain(sql, analyze=True, buffers=True), params or {}
     )
     lines = [row[0] for row in text_plan]
 

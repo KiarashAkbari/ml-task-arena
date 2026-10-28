@@ -1,12 +1,9 @@
-"""Measure every dashboard query and write the evidence to data/db/.
+"""Time every dashboard query and write the evidence to data/db/.
 
-Usage:
-    python scripts/measure_queries.py --url ... --label baseline
-    python scripts/measure_queries.py --url ... --label optimized
+Thin CLI over ``data_factory.db.evidence.query_evidence`` so the notebook,
+this script and the report all measure through the same code.
 
-The label only names the output file (``data/db/query_evidence_<label>.json``);
-the numbers always come from a real run, so nothing here can manufacture a
-before/after pair that did not happen.
+    python scripts/measure_queries.py --url "$DATABASE_URL" --label optimized
 """
 
 from __future__ import annotations
@@ -19,47 +16,35 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from data_factory.db.connection import engine_scope  # noqa: E402
-from data_factory.db.queries import QUERIES  # noqa: E402
-from data_factory.db.timing import Evidence, explain, measure, to_json  # noqa: E402
+from data_factory.db.evidence import query_evidence  # noqa: E402
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
     parser.add_argument("--label", default="run")
-    parser.add_argument("--runs", type=int, default=7)
-    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--runs", type=int, default=15)
+    parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--out-dir", default="data/db")
     args = parser.parse_args()
 
-    evidence: list[Evidence] = []
     with engine_scope(args.url) as engine:
-        with engine.connect() as conn:
-            for query in QUERIES:
-                # The served form is what the 200 ms budget applies to; the
-                # live form is the before-side of the comparison.
-                timing = measure(conn, query.served_sql, key=query.key,
-                                 runs=args.runs, warmup=args.warmup)
-                plan = explain(conn, query.served_sql, key=query.key)
-                live = measure(conn, query.live_sql, key=query.key + "-live",
-                               runs=args.runs, warmup=args.warmup)
-                evidence.append(Evidence(
-                    key=query.key, timing=timing, plan=plan, note=query.title,
-                    extra={"served_from": query.served_from,
-                           "live_median_ms": round(live.median_ms, 2),
-                           "live_p95_ms": round(live.p95_ms, 2)}))
-                status = "OK  " if timing.within_budget else "OVER"
-                print(
-                    f"{status} {query.key} [{query.served_from:8}] served {timing.median_ms:7.2f} ms"
-                    f"  live {live.median_ms:8.2f} ms  rows {timing.rows:>5}"
-                )
+        evidence = query_evidence(engine, runs=args.runs, warmup=args.warmup)
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"query_evidence_{args.label}.json"
-    path.write_text(to_json(evidence), encoding="utf-8")
+    payload = [item.as_dict() for item in evidence]
+    for item in payload:
+        status = "OK  " if item["within_budget"] else "OVER"
+        print(f"{status} {item['key']} [{item['served_from']:8}] "
+              f"served {item['timing']['median_ms']:7.2f} ms "
+              f"p95 {item['timing']['p95_ms']:7.2f} "
+              f"| live {item['live_median_ms']:8.2f} ms")
+
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"query_evidence_{args.label}.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"\nwrote {path}")
-    over = [e.key for e in evidence if not e.timing.within_budget]
+    over = [item["key"] for item in payload if not item["within_budget"]]
     print(f"over budget: {over if over else 'none'}")
     return 0
 

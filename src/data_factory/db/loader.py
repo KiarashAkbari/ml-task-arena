@@ -28,6 +28,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from data_factory.db import sqltext
+
 # table name -> column name -> PostgreSQL type
 COLUMN_TYPES: Mapping[str, Mapping[str, TypeEngine]] = {
     "product_category": {"name_pt": VARCHAR(60), "name_en": VARCHAR(60)},
@@ -126,8 +128,7 @@ OLIST_LOAD_ORDER = (
 )
 
 
-def _qualified(table: str, schema: str) -> str:
-    return f"{schema}.{table}"
+
 
 
 def write_frame(
@@ -137,6 +138,7 @@ def write_frame(
     *,
     schema: str = "olist",
     chunk_rows: int = 5_000,
+    column_types: Mapping[str, TypeEngine] | None = None,
 ) -> int:
     """Insert ``frame`` into ``schema.table`` in batches, with explicit types.
 
@@ -144,7 +146,15 @@ def write_frame(
     a failure halfway through a table leaves nothing behind.
     """
     key = f"{schema}.{table}" if schema == "factory" else table
-    dtypes = COLUMN_TYPES[key]
+    # The mapping is always an argument, never inferred from the frame: a
+    # caller may supply its own (used by the notebook's write demonstration),
+    # and otherwise the project-wide declaration in COLUMN_TYPES applies.
+    dtypes = column_types if column_types is not None else COLUMN_TYPES.get(key)
+    if not dtypes:
+        raise ValueError(
+            f"{table}: no declared column types in COLUMN_TYPES "
+            "(pass column_types= explicitly)"
+        )
     missing = set(frame.columns) - set(dtypes)
     if missing:
         raise ValueError(f"{table}: no declared type for columns {sorted(missing)}")
@@ -170,8 +180,8 @@ def write_frame(
 
 
 def truncate(conn: Connection, table: str, *, schema: str = "olist") -> None:
-    conn.execute(text(f"TRUNCATE {_qualified(table, schema)}"))
+    conn.execute(sqltext.truncate(table, schema))
 
 
 def count_rows(conn: Connection, table: str, *, schema: str = "olist") -> int:
-    return int(conn.execute(text(f"SELECT count(*) FROM {_qualified(table, schema)}")).scalar_one())
+    return int(conn.execute(sqltext.count_star(table, schema)).scalar_one())

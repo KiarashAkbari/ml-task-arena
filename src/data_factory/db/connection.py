@@ -14,6 +14,7 @@ from typing import Iterator
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import URL, make_url
 
+from data_factory.db import sqltext
 from data_factory.errors import ConfigError
 
 MAINTENANCE_DATABASE = "postgres"
@@ -92,8 +93,9 @@ def ensure_database(url: str) -> bool:
             # The identifier is an identifier, so it cannot be a bind
             # parameter; quote it with the driver's own quoting rather than
             # pasting it into the statement.
-            quoted = admin_engine.dialect.identifier_preparer.quote(target)
-            conn.execute(text(f"CREATE DATABASE {quoted}"))
+            conn.execute(
+                sqltext.create_database(target, admin_engine.dialect.identifier_preparer.quote)
+            )
             return True
     finally:
         admin_engine.dispose()

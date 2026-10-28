@@ -22,6 +22,7 @@ from pathlib import Path
 from sqlalchemy import Connection, text
 
 from data_factory.db import ddl as ddl_module
+from data_factory.db import sqltext
 from data_factory.db.connection import engine_scope, ensure_database, redact_url
 from data_factory.db.factory_output import load_factory_output
 from data_factory.db.loader import OLIST_LOAD_ORDER, count_rows, write_frame
@@ -81,12 +82,9 @@ def _verify(conn: Connection, report: LoadReport) -> None:
     """Prove the load is complete and connected, not just 'no exception'."""
     orphans: dict[str, int] = {}
     for child, column, parent, parent_column in FOREIGN_KEYS:
-        query = text(
-            f"SELECT count(*) FROM olist.{child} c "
-            f"LEFT JOIN olist.{parent} p ON c.{column} = p.{parent_column} "
-            f"WHERE c.{column} IS NOT NULL AND p.{parent_column} IS NULL"
-        )
-        orphans[f"{child}.{column} -> {parent}.{parent_column}"] = int(conn.execute(query).scalar_one())
+        query = sqltext.foreign_key_orphans(child, column, parent, parent_column)
+        orphans[f"{child}.{column} -> {parent}.{parent_column}"] = int(
+            conn.execute(query).scalar_one())
 
     # Do the CHECK constraints actually bite?  Probe a few representative ones
     # inside savepoints and require each probe to be refused.
